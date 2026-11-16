@@ -76,6 +76,27 @@ class ToolType(str, Enum):
     TEXT = "text"
 
 
+CROP_ASPECT_PRESETS: dict[str, Optional[tuple[float, float]]] = {
+    "free": None,
+    "1:1": (1.0, 1.0),
+    "4:3": (4.0, 3.0),
+    "3:4": (3.0, 4.0),
+    "16:9": (16.0, 9.0),
+    "9:16": (9.0, 16.0),
+    "3:2": (3.0, 2.0),
+    "2:3": (2.0, 3.0),
+}
+
+_CROP_SWAP_MAP: dict[str, str] = {
+    "4:3": "3:4",
+    "3:4": "4:3",
+    "16:9": "9:16",
+    "9:16": "16:9",
+    "3:2": "2:3",
+    "2:3": "3:2",
+}
+
+
 @dataclass
 class ToolContext:
     """Shared mutable tool settings and UI callbacks across all tools."""
@@ -95,6 +116,8 @@ class ToolContext:
     wand_contiguous: bool = True
     fill_tolerance: int = 32
     fill_contiguous: bool = True
+    crop_aspect_preset: str = "free"
+    crop_aspect_ratio: Optional[tuple[float, float]] = None
     font_family: str = "Segoe UI"
     font_size: int = 28
     font_bold: bool = False
@@ -104,6 +127,22 @@ class ToolContext:
     on_color_picked: Optional[Callable[[tuple[int, int, int, int]], None]] = None
     on_canvas_invalidated: Optional[Callable[[], None]] = None
     on_document_resized: Optional[Callable[[], None]] = None
+
+    def set_crop_preset(self, preset: str) -> None:
+        key = str(preset).strip().lower()
+        if key not in CROP_ASPECT_PRESETS:
+            key = "free"
+        self.crop_aspect_preset = key
+        self.crop_aspect_ratio = CROP_ASPECT_PRESETS[key]
+
+    def swap_crop_orientation(self) -> str:
+        if self.crop_aspect_preset in _CROP_SWAP_MAP:
+            swapped = _CROP_SWAP_MAP[self.crop_aspect_preset]
+            self.set_crop_preset(swapped)
+        elif self.crop_aspect_ratio is not None:
+            rw, rh = self.crop_aspect_ratio
+            self.crop_aspect_ratio = (rh, rw)
+        return self.crop_aspect_preset
 
     def notify_color_picked(self, color: tuple[int, int, int, int]) -> None:
         if self.on_color_picked is not None:

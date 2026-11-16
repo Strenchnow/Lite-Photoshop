@@ -8,7 +8,16 @@ from typing import Optional
 import numpy as np
 from PIL import Image
 from PySide6.QtCore import QEvent, Qt
-from PySide6.QtGui import QAction, QActionGroup, QGuiApplication, QImage, QKeySequence
+from PySide6.QtGui import (
+    QAction,
+    QActionGroup,
+    QDragEnterEvent,
+    QDragMoveEvent,
+    QDropEvent,
+    QGuiApplication,
+    QImage,
+    QKeySequence,
+)
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QComboBox,
@@ -17,6 +26,7 @@ from PySide6.QtWidgets import (
     QDockWidget,
     QFileDialog,
     QFormLayout,
+    QHBoxLayout,
     QKeySequenceEdit,
     QLabel,
     QLineEdit,
@@ -25,15 +35,17 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QTabBar,
     QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
+from app.config.i18n import get_language, set_language as set_i18n_language, tr
 from app.core.ai_bg_remove import apply_ai_background_removal
 from app.core.document import DocumentSession, DocumentTabManager
 from app.core.layer import Layer
-from app.tools import BaseTool, ToolContext, ToolType, create_default_tools
-from app.ui.canvas_view import CanvasView
+from app.tools import BaseTool, CropTool, ToolContext, ToolType, create_default_tools
+from app.ui.canvas_view import CanvasView, extract_image_paths_from_mime
 from app.ui.dialogs import (
     BatchProcessorDialog,
     ChromaKeyDialog,
@@ -46,22 +58,22 @@ from app.ui.dialogs import (
 from app.ui.panels import ColorPanel, LayersPanel, ToolOptionsBar
 
 
-_TOOL_SPECS: tuple[tuple[str, str, str], ...] = (
-    (ToolType.MOVE.value, "Move", "Move Layer (V)"),
-    (ToolType.HAND.value, "Hand", "Hand Pan (H)"),
-    (ToolType.MARQUEE.value, "Marquee", "Rectangular Marquee (M)"),
-    (ToolType.LASSO.value, "Lasso", "Freehand Lasso (L)"),
-    (ToolType.MAGIC_WAND.value, "Wand", "Magic Wand (W)"),
-    (ToolType.CROP.value, "Crop", "Crop Canvas (C)"),
-    (ToolType.TRANSFORM.value, "Transform", "Free Transform (Ctrl+T)"),
-    (ToolType.BRUSH.value, "Brush", "Brush (B)"),
-    (ToolType.ERASER.value, "Eraser", "Eraser (E)"),
-    (ToolType.SMUDGE.value, "Smudge", "Smudge (S)"),
-    (ToolType.BLUR_SHARPEN.value, "Blur/Sharp", "Local Blur / Sharpen (R)"),
-    (ToolType.BUCKET_FILL.value, "Fill", "Bucket Fill (G)"),
-    (ToolType.GRADIENT.value, "Gradient", "Linear Gradient (K)"),
-    (ToolType.EYEDROPPER.value, "Picker", "Eyedropper (I)"),
-    (ToolType.TEXT.value, "Text", "Text Tool (T)"),
+_TOOL_ORDER: tuple[str, ...] = (
+    ToolType.MOVE.value,
+    ToolType.HAND.value,
+    ToolType.MARQUEE.value,
+    ToolType.LASSO.value,
+    ToolType.MAGIC_WAND.value,
+    ToolType.CROP.value,
+    ToolType.TRANSFORM.value,
+    ToolType.BRUSH.value,
+    ToolType.ERASER.value,
+    ToolType.SMUDGE.value,
+    ToolType.BLUR_SHARPEN.value,
+    ToolType.BUCKET_FILL.value,
+    ToolType.GRADIENT.value,
+    ToolType.EYEDROPPER.value,
+    ToolType.TEXT.value,
 )
 
 
@@ -77,12 +89,18 @@ def qimage_to_rgba_numpy(qimg: QImage) -> np.ndarray:
     return np.ascontiguousarray(arr[:, : w * 4].reshape((h, w, 4)).copy(), dtype=np.uint8)
 
 
+def load_image_file_rgba(path: Path) -> np.ndarray:
+    """Load an image file from disk as a contiguous (H, W, 4) uint8 RGBA array."""
+    with Image.open(path) as im:
+        return np.ascontiguousarray(np.asarray(im.convert("RGBA"), dtype=np.uint8))
+
+
 class _NewCanvasDialog(QDialog):
-    """Lightweight dialog for custom document dimensions."""
+    """Lightweight dialog for custom document dimensions and background fill."""
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("New Canvas")
+        self.setWindowTitle(tr("new_canvas.title"))
         layout = QVBoxLayout(self)
         form = QFormLayout()
         self.width_spin = QSpinBox()
@@ -92,10 +110,12 @@ class _NewCanvasDialog(QDialog):
         self.height_spin.setRange(1, 16384)
         self.height_spin.setValue(1024)
         self.bg_combo = QComboBox()
-        self.bg_combo.addItems(["Transparent", "White", "Black"])
-        form.addRow("Width (px):", self.width_spin)
-        form.addRow("Height (px):", self.height_spin)
-        form.addRow("Background:", self.bg_combo)
+        self.bg_combo.addItem(tr("new_canvas.bg_white"), "white")
+        self.bg_combo.addItem(tr("new_canvas.bg_transparent"), "transparent")
+        self.bg_combo.addItem(tr("new_canvas.bg_black"), "black")
+        form.addRow(tr("new_canvas.width"), self.width_spin)
+        form.addRow(tr("new_canvas.height"), self.height_spin)
+        form.addRow(tr("new_canvas.background"), self.bg_combo)
         layout.addLayout(form)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -113,8 +133,9 @@ class MainWindow(QMainWindow):
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("LitePhotoEditor")
+        self.setWindowTitle(tr("app.title"))
         self.resize(1280, 820)
+        self.setAcceptDrops(True)
 
         self.tab_manager = tab_manager if tab_manager is not None else DocumentTabManager()
         self.tool_context = ToolContext(
@@ -131,6 +152,8 @@ class MainWindow(QMainWindow):
 
         self.tool_actions: dict[str, QAction] = {}
         self.editor_actions: dict[str, QAction] = {}
+        self._misc_actions: dict[str, QAction] = {}
+        self._menus: dict[str, object] = {}
         self.keybindings: dict[str, str] = {}
 
         self._build_central_area()
@@ -140,11 +163,12 @@ class MainWindow(QMainWindow):
         self._build_status_bar()
         self._connect_signals()
 
+        self.retranslate_ui()
         self.keybindings = load_keybindings()
         self.apply_keybindings(self.keybindings)
 
         if create_initial_doc and not self.tab_manager.sessions:
-            self.new_document(800, 600, title="Untitled-1")
+            self.new_document(800, 600, initial_fill=(255, 255, 255, 255))
         else:
             self._sync_tabs()
 
@@ -157,12 +181,27 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
+        tab_strip = QWidget()
+        tab_strip.setObjectName("TabStrip")
+        tab_strip_layout = QHBoxLayout(tab_strip)
+        tab_strip_layout.setContentsMargins(0, 0, 0, 0)
+        tab_strip_layout.setSpacing(0)
+
         self.tab_bar = QTabBar()
         self.tab_bar.setTabsClosable(True)
         self.tab_bar.setMovable(False)
         self.tab_bar.setExpanding(False)
         self.tab_bar.setDocumentMode(True)
-        layout.addWidget(self.tab_bar)
+        tab_strip_layout.addWidget(self.tab_bar)
+
+        self.new_tab_btn = QToolButton()
+        self.new_tab_btn.setObjectName("NewTabButton")
+        self.new_tab_btn.setText("+")
+        self.new_tab_btn.clicked.connect(lambda: self.new_document())
+        tab_strip_layout.addWidget(self.new_tab_btn)
+        tab_strip_layout.addStretch(1)
+
+        layout.addWidget(tab_strip)
 
         self.tool_options_bar = ToolOptionsBar(self.tool_context)
         layout.addWidget(self.tool_options_bar)
@@ -175,21 +214,21 @@ class MainWindow(QMainWindow):
 
     def _build_docks(self) -> None:
         self.color_panel = ColorPanel(self.tool_context)
-        self.color_dock = QDockWidget("Colors & Swatches", self)
+        self.color_dock = QDockWidget(tr("dock.colors"), self)
         self.color_dock.setObjectName("ColorDock")
         self.color_dock.setWidget(self.color_panel)
         self.color_dock.setMinimumWidth(240)
         self.addDockWidget(Qt.RightDockWidgetArea, self.color_dock)
 
         self.layers_panel = LayersPanel(self.tool_context)
-        self.layers_dock = QDockWidget("Layers", self)
+        self.layers_dock = QDockWidget(tr("dock.layers"), self)
         self.layers_dock.setObjectName("LayersDock")
         self.layers_dock.setWidget(self.layers_panel)
         self.layers_dock.setMinimumWidth(240)
         self.addDockWidget(Qt.RightDockWidgetArea, self.layers_dock)
 
     def _build_tools_toolbar(self) -> None:
-        self.tools_toolbar = QToolBar("Tools", self)
+        self.tools_toolbar = QToolBar(tr("dock.tools"), self)
         self.tools_toolbar.setObjectName("ToolsToolBar")
         self.tools_toolbar.setMovable(False)
         self.tools_toolbar.setOrientation(Qt.Vertical)
@@ -198,10 +237,9 @@ class MainWindow(QMainWindow):
         self._tool_action_group = QActionGroup(self)
         self._tool_action_group.setExclusive(True)
 
-        for tool_id, label, tooltip in _TOOL_SPECS:
-            act = QAction(label, self)
+        for tool_id in _TOOL_ORDER:
+            act = QAction("", self)
             act.setCheckable(True)
-            act.setToolTip(tooltip)
             act.setData(tool_id)
             act.triggered.connect(lambda _chk=False, tid=tool_id: self.select_tool(tid))
             self._tool_action_group.addAction(act)
@@ -211,167 +249,158 @@ class MainWindow(QMainWindow):
     def _register_editor_action(
         self,
         key: str,
-        text: str,
+        text_key: str,
         slot,
         checkable: bool = False,
     ) -> QAction:
-        act = QAction(text, self)
+        act = QAction(tr(text_key), self)
         act.setCheckable(checkable)
         act.triggered.connect(slot)
         self.addAction(act)
         self.editor_actions[key] = act
+        self._misc_actions[text_key] = act
+        return act
+
+    def _register_misc_action(self, text_key: str, slot, shortcut: str = "") -> QAction:
+        act = QAction(tr(text_key), self)
+        if shortcut:
+            act.setShortcut(QKeySequence(shortcut))
+        act.triggered.connect(slot)
+        self._misc_actions[text_key] = act
         return act
 
     def _build_menus(self) -> None:
         mb = self.menuBar()
 
         # File Menu
-        file_menu = mb.addMenu("&File")
-        file_menu.addAction(self._register_editor_action("new_tab", "&New Tab", self.new_document))
-        act_new_custom = QAction("New &Custom Canvas...", self)
-        act_new_custom.triggered.connect(self._open_new_custom_dialog)
-        file_menu.addAction(act_new_custom)
-        file_menu.addAction(self._register_editor_action("open_file", "&Open...", self.open_file))
-        file_menu.addAction(self._register_editor_action("save_file", "&Save", self.save_file))
+        file_menu = mb.addMenu(tr("menu.file"))
+        self._menus["menu.file"] = file_menu
+        file_menu.addAction(self._register_editor_action("new_tab", "action.new_tab", self.new_document))
+        file_menu.addAction(self._register_misc_action("action.new_custom", self._open_new_custom_dialog))
+        file_menu.addAction(self._register_editor_action("open_file", "action.open_file", self.open_file))
+        file_menu.addAction(self._register_editor_action("save_file", "action.save_file", self.save_file))
         file_menu.addSeparator()
         file_menu.addAction(
-            self._register_editor_action("quick_export", "Quick &Export...", self.open_quick_export)
+            self._register_editor_action("quick_export", "action.quick_export", self.open_quick_export)
         )
-        act_batch = QAction("&Batch Processor...", self)
-        act_batch.triggered.connect(self.open_batch_processor)
-        file_menu.addAction(act_batch)
+        file_menu.addAction(self._register_misc_action("action.batch", self.open_batch_processor))
         file_menu.addSeparator()
-        act_close_tab = QAction("&Close Tab", self)
-        act_close_tab.setShortcut(QKeySequence("Ctrl+W"))
-        act_close_tab.triggered.connect(self.close_current_tab)
-        file_menu.addAction(act_close_tab)
-        act_exit = QAction("E&xit", self)
-        act_exit.triggered.connect(self.close)
-        file_menu.addAction(act_exit)
+        file_menu.addAction(self._register_misc_action("action.close_tab", self.close_current_tab, "Ctrl+W"))
+        file_menu.addAction(self._register_misc_action("action.exit", self.close))
 
         # Edit Menu
-        edit_menu = mb.addMenu("&Edit")
-        edit_menu.addAction(self._register_editor_action("undo", "&Undo", self.undo))
-        edit_menu.addAction(self._register_editor_action("redo", "&Redo", self.redo))
+        edit_menu = mb.addMenu(tr("menu.edit"))
+        self._menus["menu.edit"] = edit_menu
+        edit_menu.addAction(self._register_editor_action("undo", "action.undo", self.undo))
+        edit_menu.addAction(self._register_editor_action("redo", "action.redo", self.redo))
         edit_menu.addSeparator()
-        act_copy = QAction("&Copy Selection", self)
-        act_copy.setShortcut(QKeySequence("Ctrl+C"))
-        act_copy.triggered.connect(self.copy_selection)
-        edit_menu.addAction(act_copy)
+        edit_menu.addAction(self._register_misc_action("action.copy", self.copy_selection, "Ctrl+C"))
         edit_menu.addAction(
-            self._register_editor_action(
-                "paste_clipboard", "&Paste / New Tab from Clipboard", self.paste_from_clipboard
-            )
+            self._register_editor_action("paste_clipboard", "action.paste", self.paste_from_clipboard)
         )
-        act_desel = QAction("&Deselect", self)
-        act_desel.setShortcut(QKeySequence("Ctrl+D"))
-        act_desel.triggered.connect(self.clear_selection)
-        edit_menu.addAction(act_desel)
+        edit_menu.addAction(self._register_misc_action("action.deselect", self.clear_selection, "Ctrl+D"))
         edit_menu.addSeparator()
-        act_hotkeys = QAction("&Keyboard Shortcuts...", self)
-        act_hotkeys.triggered.connect(self.open_hotkey_editor)
-        edit_menu.addAction(act_hotkeys)
+        edit_menu.addAction(self._register_misc_action("action.hotkeys", self.open_hotkey_editor))
 
         # Image Menu
-        image_menu = mb.addMenu("&Image")
-        act_trim = QAction("&Trim Transparent Pixels", self)
-        act_trim.triggered.connect(self.trim_transparent)
-        image_menu.addAction(act_trim)
+        image_menu = mb.addMenu(tr("menu.image"))
+        self._menus["menu.image"] = image_menu
+        image_menu.addAction(self._register_misc_action("action.trim", self.trim_transparent))
         image_menu.addSeparator()
-        act_ai_bg = QAction("&AI Remove Background", self)
-        act_ai_bg.triggered.connect(self.run_ai_background_removal)
-        image_menu.addAction(act_ai_bg)
-        act_chroma = QAction("&Chroma Key...", self)
-        act_chroma.triggered.connect(self.open_chroma_key)
-        image_menu.addAction(act_chroma)
+        image_menu.addAction(self._register_misc_action("action.ai_bg", self.run_ai_background_removal))
+        image_menu.addAction(self._register_misc_action("action.chroma_key", self.open_chroma_key))
         image_menu.addSeparator()
-        act_grid_split = QAction("&Grid Splitter...", self)
-        act_grid_split.triggered.connect(self.open_grid_splitter)
-        image_menu.addAction(act_grid_split)
-        act_alpha_split = QAction("Smart &Alpha Splitter...", self)
-        act_alpha_split.triggered.connect(self.open_smart_alpha_splitter)
-        image_menu.addAction(act_alpha_split)
+        image_menu.addAction(self._register_misc_action("action.grid_split", self.open_grid_splitter))
+        image_menu.addAction(self._register_misc_action("action.alpha_split", self.open_smart_alpha_splitter))
 
         # Layer Menu
-        layer_menu = mb.addMenu("&Layer")
-        act_add_l = QAction("&Add Layer", self)
-        act_add_l.triggered.connect(self.layers_panel.add_layer)
-        layer_menu.addAction(act_add_l)
-        act_dup_l = QAction("&Duplicate Layer", self)
-        act_dup_l.triggered.connect(self.layers_panel.duplicate_layer)
-        layer_menu.addAction(act_dup_l)
-        act_del_l = QAction("De&lete Layer", self)
-        act_del_l.triggered.connect(self.layers_panel.delete_layer)
-        layer_menu.addAction(act_del_l)
-        act_merge_l = QAction("&Merge Down", self)
-        act_merge_l.triggered.connect(self.layers_panel.merge_down)
-        layer_menu.addAction(act_merge_l)
+        layer_menu = mb.addMenu(tr("menu.layer"))
+        self._menus["menu.layer"] = layer_menu
+        layer_menu.addAction(self._register_misc_action("action.add_layer", self.layers_panel.add_layer))
+        layer_menu.addAction(self._register_misc_action("action.dup_layer", self.layers_panel.duplicate_layer))
+        layer_menu.addAction(self._register_misc_action("action.del_layer", self.layers_panel.delete_layer))
+        layer_menu.addAction(self._register_misc_action("action.merge_down", self.layers_panel.merge_down))
         layer_menu.addSeparator()
-        act_mask = QAction("Add / Delete Layer &Mask", self)
-        act_mask.triggered.connect(self.layers_panel.add_or_delete_mask)
-        layer_menu.addAction(act_mask)
-        act_clip = QAction("Toggle &Clipping Mask", self)
-        act_clip.triggered.connect(self.layers_panel.toggle_clipping_mask)
-        layer_menu.addAction(act_clip)
+        layer_menu.addAction(
+            self._register_misc_action("action.toggle_mask_add_del", self.layers_panel.add_or_delete_mask)
+        )
+        layer_menu.addAction(
+            self._register_misc_action("action.toggle_clip", self.layers_panel.toggle_clipping_mask)
+        )
         layer_menu.addSeparator()
-        act_ch = QAction("Center &Horizontal", self)
-        act_ch.triggered.connect(lambda: self.center_active_layer(True, False))
-        layer_menu.addAction(act_ch)
-        act_cv = QAction("Center &Vertical", self)
-        act_cv.triggered.connect(lambda: self.center_active_layer(False, True))
-        layer_menu.addAction(act_cv)
+        layer_menu.addAction(
+            self._register_misc_action("action.center_h", lambda: self.center_active_layer(True, False))
+        )
+        layer_menu.addAction(
+            self._register_misc_action("action.center_v", lambda: self.center_active_layer(False, True))
+        )
         layer_menu.addAction(
             self._register_editor_action(
-                "center_both", "Center &Both", lambda: self.center_active_layer(True, True)
+                "center_both", "action.center_both", lambda: self.center_active_layer(True, True)
             )
         )
 
         # Tools Menu
-        tools_menu = mb.addMenu("&Tools")
-        for tool_id, _, _ in _TOOL_SPECS:
+        tools_menu = mb.addMenu(tr("menu.tools"))
+        self._menus["menu.tools"] = tools_menu
+        for tool_id in _TOOL_ORDER:
             if tool_id in self.tool_actions:
                 tools_menu.addAction(self.tool_actions[tool_id])
         tools_menu.addSeparator()
-        act_swap = QAction("Swap FG/BG Colors", self)
-        act_swap.setShortcut(QKeySequence("X"))
-        act_swap.triggered.connect(self.color_panel.swap_colors)
-        tools_menu.addAction(act_swap)
-        act_reset_bw = QAction("Reset B/W Colors", self)
-        act_reset_bw.setShortcut(QKeySequence("D"))
-        act_reset_bw.triggered.connect(self.color_panel.reset_colors)
-        tools_menu.addAction(act_reset_bw)
+        tools_menu.addAction(
+            self._register_misc_action("action.swap_colors", self.color_panel.swap_colors, "X")
+        )
+        tools_menu.addAction(
+            self._register_misc_action("action.reset_colors", self.color_panel.reset_colors, "D")
+        )
 
         # View Menu
-        view_menu = mb.addMenu("&View")
-        act_zoom_in = QAction("Zoom &In", self)
-        act_zoom_in.setShortcut(QKeySequence("Ctrl+="))
-        act_zoom_in.triggered.connect(lambda: self._zoom_by(1.25))
-        view_menu.addAction(act_zoom_in)
-        act_zoom_out = QAction("Zoom &Out", self)
-        act_zoom_out.setShortcut(QKeySequence("Ctrl+-"))
-        act_zoom_out.triggered.connect(lambda: self._zoom_by(0.8))
-        view_menu.addAction(act_zoom_out)
-        act_fit = QAction("&Fit to Screen", self)
-        act_fit.setShortcut(QKeySequence("Ctrl+0"))
-        act_fit.triggered.connect(self.canvas_view.fit_to_view)
-        view_menu.addAction(act_fit)
-        act_100 = QAction("&Actual Size (100%)", self)
-        act_100.setShortcut(QKeySequence("Ctrl+1"))
-        act_100.triggered.connect(self.canvas_view.set_zoom_100)
-        view_menu.addAction(act_100)
+        view_menu = mb.addMenu(tr("menu.view"))
+        self._menus["menu.view"] = view_menu
+        view_menu.addAction(
+            self._register_misc_action("action.zoom_in", lambda: self._zoom_by(1.25), "Ctrl+=")
+        )
+        view_menu.addAction(
+            self._register_misc_action("action.zoom_out", lambda: self._zoom_by(0.8), "Ctrl+-")
+        )
+        view_menu.addAction(
+            self._register_misc_action("action.fit_screen", self.canvas_view.fit_to_view, "Ctrl+0")
+        )
+        view_menu.addAction(
+            self._register_misc_action("action.actual_size", self.canvas_view.set_zoom_100, "Ctrl+1")
+        )
         view_menu.addSeparator()
         view_menu.addAction(
-            self._register_editor_action("zen_mode", "&Zen Mode", self.toggle_zen_mode, checkable=True)
+            self._register_editor_action("zen_mode", "action.zen_mode", self.toggle_zen_mode, checkable=True)
         )
         view_menu.addSeparator()
         view_menu.addAction(self.layers_dock.toggleViewAction())
         view_menu.addAction(self.color_dock.toggleViewAction())
 
+        # Language submenu
+        lang_menu = view_menu.addMenu(tr("menu.language"))
+        self._menus["menu.language"] = lang_menu
+        self._lang_group = QActionGroup(self)
+        self._lang_group.setExclusive(True)
+        self.act_lang_ru = QAction(tr("lang.ru"), self)
+        self.act_lang_ru.setCheckable(True)
+        self.act_lang_ru.setChecked(get_language() == "ru")
+        self.act_lang_ru.triggered.connect(lambda: self.set_language("ru"))
+        self.act_lang_en = QAction(tr("lang.en"), self)
+        self.act_lang_en.setCheckable(True)
+        self.act_lang_en.setChecked(get_language() == "en")
+        self.act_lang_en.triggered.connect(lambda: self.set_language("en"))
+        self._lang_group.addAction(self.act_lang_ru)
+        self._lang_group.addAction(self.act_lang_en)
+        lang_menu.addAction(self.act_lang_ru)
+        lang_menu.addAction(self.act_lang_en)
+
     def _build_status_bar(self) -> None:
         sb = self.statusBar()
-        self.status_zoom_label = QLabel("Zoom: 100%")
-        self.status_cursor_label = QLabel("X: 0, Y: 0")
-        self.status_doc_label = QLabel("0 x 0 px")
+        self.status_zoom_label = QLabel()
+        self.status_zoom_label.setObjectName("StatusZoomLabel")
+        self.status_cursor_label = QLabel(tr("status.cursor", x=0, y=0))
+        self.status_doc_label = QLabel()
 
         sb.addWidget(self.status_zoom_label)
         sb.addWidget(self.status_cursor_label)
@@ -384,11 +413,14 @@ class MainWindow(QMainWindow):
         self.canvas_view.cursorMoved.connect(self._on_cursor_moved)
         self.canvas_view.zoomChanged.connect(self._on_zoom_changed)
         self.canvas_view.documentModified.connect(self._on_canvas_document_modified)
+        self.canvas_view.filesDropped.connect(self.insert_image_files_as_layers)
 
         self.layers_panel.layersChanged.connect(self._on_layers_changed)
         self.layers_panel.activeLayerChanged.connect(self._on_active_layer_changed)
+        self.layers_panel.filesDropped.connect(self.insert_image_files_as_layers)
 
         self.tool_options_bar.optionsChanged.connect(self._on_tool_options_changed)
+        self.tool_options_bar.cropOptionsChanged.connect(self._on_crop_options_changed)
         self.tool_options_bar.centerRequested.connect(self.center_active_layer)
         self.tool_options_bar.clearSelectionRequested.connect(self.clear_selection)
         self.tool_options_bar.fitViewRequested.connect(self.canvas_view.fit_to_view)
@@ -398,13 +430,45 @@ class MainWindow(QMainWindow):
         self.color_panel.fgColorChanged.connect(lambda _c: self.canvas_view.update())
         self.color_panel.bgColorChanged.connect(lambda _c: self.canvas_view.update())
 
+    def set_language(self, lang: str, persist: bool = True) -> None:
+        set_i18n_language(lang, persist=persist)
+        self.act_lang_ru.setChecked(get_language() == "ru")
+        self.act_lang_en.setChecked(get_language() == "en")
+        self.retranslate_ui()
+
+    def retranslate_ui(self) -> None:
+        self.setWindowTitle(tr("app.title"))
+        self.color_dock.setWindowTitle(tr("dock.colors"))
+        self.layers_dock.setWindowTitle(tr("dock.layers"))
+        self.tools_toolbar.setWindowTitle(tr("dock.tools"))
+        self.new_tab_btn.setToolTip(tr("tab.new_btn_tip"))
+
+        for key, menu in self._menus.items():
+            menu.setTitle(tr(key))  # type: ignore[attr-defined]
+
+        for text_key, act in self._misc_actions.items():
+            act.setText(tr(text_key))
+
+        for tool_id, act in self.tool_actions.items():
+            act.setText(tr(f"tool.short.{tool_id}"))
+            full_name = tr(f"tool.name.{tool_id}")
+            seq = self.keybindings.get(tool_id, "")
+            act.setToolTip(f"{full_name} ({seq})" if seq else full_name)
+
+        self.tool_options_bar.retranslate_ui()
+        self.tool_options_bar.set_active_tool(self.active_tool_id)
+        self.color_panel.retranslate_ui()
+        self.layers_panel.retranslate_ui()
+        self._update_status_bar()
+        self.canvas_view.update()
+
     def apply_keybindings(self, bindings: dict[str, str]) -> None:
         self.keybindings = dict(bindings)
         for tool_id, act in self.tool_actions.items():
             seq = bindings.get(tool_id, "")
             act.setShortcut(QKeySequence.fromString(seq) if seq else QKeySequence())
-            base_tip = act.text()
-            act.setToolTip(f"{base_tip} ({seq})" if seq else base_tip)
+            full_name = tr(f"tool.name.{tool_id}")
+            act.setToolTip(f"{full_name} ({seq})" if seq else full_name)
         for key, act in self.editor_actions.items():
             seq = bindings.get(key, "")
             act.setShortcut(QKeySequence.fromString(seq) if seq else QKeySequence())
@@ -421,8 +485,55 @@ class MainWindow(QMainWindow):
         self.canvas_view.set_active_tool(tool)
         if tool_id in self.tool_actions:
             self.tool_actions[tool_id].setChecked(True)
-        self.tool_options_bar.set_active_tool(tool_id, display_name=tool.name)
+        self.tool_options_bar.set_active_tool(tool_id, display_name=tr(f"tool.name.{tool_id}"))
         self.layers_panel.refresh()
+
+    # --- Drag & Drop onto MainWindow (Tab bar / empty shell -> new tabs) ---
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        if extract_image_paths_from_mime(event.mimeData()):
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event: QDragMoveEvent) -> None:
+        if extract_image_paths_from_mime(event.mimeData()):
+            event.acceptProposedAction()
+            return
+        super().dragMoveEvent(event)
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        paths = extract_image_paths_from_mime(event.mimeData())
+        if paths:
+            for p in paths:
+                self.open_file(p)
+            event.acceptProposedAction()
+            return
+        super().dropEvent(event)
+
+    def insert_image_files_as_layers(self, paths: list[Path]) -> list[Layer]:
+        """Insert dropped/pasted local image files as centered layers in the active document."""
+        doc = self.active_document
+        if doc is None:
+            for p in paths:
+                self.open_file(p)
+            return []
+
+        inserted: list[Layer] = []
+        for path in paths:
+            try:
+                rgba = load_image_file_rgba(Path(path))
+            except Exception:
+                continue
+            new_layer = Layer.from_rgba(rgba, name=Path(path).stem, copy=False)
+            new_layer.center_on_canvas(doc.width, doc.height, use_content_bounds=False)
+            doc.add_layer(layer=new_layer, index=doc.active_layer_index + 1)
+            inserted.append(new_layer)
+
+        if inserted:
+            self.layers_panel.refresh()
+            self._refresh_canvas_and_tabs()
+        return inserted
 
     # --- Tab & Document Lifecycle ---
 
@@ -469,18 +580,21 @@ class MainWindow(QMainWindow):
         width: int = 800,
         height: int = 600,
         title: Optional[str] = None,
-        initial_fill: tuple[int, int, int, int] = (0, 0, 0, 0),
+        initial_fill: tuple[int, int, int, int] = (255, 255, 255, 255),
     ) -> DocumentSession:
-        # Qt triggered(bool) passes False if connected directly without default check
         if isinstance(width, bool):
             width = 800
+        doc_title = title or f"{tr('doc.untitled')}-{len(self.tab_manager.sessions) + 1}"
         doc = self.tab_manager.new_document(
             width=int(width),
             height=int(height),
-            title=title,
+            title=doc_title,
             initial_fill=initial_fill,
             activate=True,
         )
+        if doc.layers:
+            doc.layers[0].name = tr("doc.background_layer")
+        doc.modified = False
         self._sync_tabs()
         if self.canvas_view.isVisible() and self.canvas_view.width() > 120 and self.canvas_view.height() > 120:
             self.canvas_view.fit_to_view()
@@ -490,18 +604,19 @@ class MainWindow(QMainWindow):
         dlg = _NewCanvasDialog(self)
         if dlg.exec() == QDialog.Accepted:
             fill_map = {
-                "Transparent": (0, 0, 0, 0),
-                "White": (255, 255, 255, 255),
-                "Black": (0, 0, 0, 255),
+                "transparent": (0, 0, 0, 0),
+                "white": (255, 255, 255, 255),
+                "black": (0, 0, 0, 255),
             }
-            fill = fill_map.get(dlg.bg_combo.currentText(), (0, 0, 0, 0))
+            bg_key = str(dlg.bg_combo.currentData() or "white")
+            fill = fill_map.get(bg_key, (255, 255, 255, 255))
             self.new_document(dlg.width_spin.value(), dlg.height_spin.value(), initial_fill=fill)
 
     def open_file(self, file_path: Optional[Path] = None) -> Optional[DocumentSession]:
         if file_path is None or isinstance(file_path, bool):
             chosen, _ = QFileDialog.getOpenFileName(
                 self,
-                "Open Image",
+                tr("dlg.open_title"),
                 "",
                 "Images (*.png *.jpg *.jpeg *.webp *.bmp);;All Files (*)",
             )
@@ -511,9 +626,7 @@ class MainWindow(QMainWindow):
         else:
             target = Path(file_path)
 
-        with Image.open(target) as im:
-            rgba = np.ascontiguousarray(np.asarray(im.convert("RGBA"), dtype=np.uint8))
-
+        rgba = load_image_file_rgba(target)
         doc = self.tab_manager.new_document_from_rgba(rgba, title=target.name, activate=True)
         doc.file_path = target
         doc.modified = False
@@ -534,7 +647,7 @@ class MainWindow(QMainWindow):
         else:
             chosen, _ = QFileDialog.getSaveFileName(
                 self,
-                "Save Image",
+                tr("dlg.save_title"),
                 f"{doc.title}.png",
                 "PNG Files (*.png);;JPEG Files (*.jpg *.jpeg);;WEBP Files (*.webp);;All Files (*)",
             )
@@ -625,29 +738,44 @@ class MainWindow(QMainWindow):
         return True
 
     def paste_from_clipboard(self) -> Optional[DocumentSession]:
-        """Paste internal selection if present, else quick-create a new tab from OS clipboard image."""
+        """Paste internal selection, Explorer image URLs, or OS clipboard screenshot."""
         doc = self.active_document
         if (
             doc is not None
             and doc.selection_mask is not None
             and self._internal_clipboard_rgba is not None
         ):
-            new_layer = Layer.from_rgba(self._internal_clipboard_rgba, name="Pasted Layer", copy=True)
+            new_layer = Layer.from_rgba(
+                self._internal_clipboard_rgba, name=tr("doc.layer_pasted"), copy=True
+            )
             doc.add_layer(layer=new_layer)
             self.layers_panel.refresh()
             self._refresh_canvas_and_tabs()
             return doc
 
-        qimg = QGuiApplication.clipboard().image()
+        clipboard = QGuiApplication.clipboard()
+        mime = clipboard.mimeData()
+        url_paths = extract_image_paths_from_mime(mime)
+        if url_paths:
+            if doc is not None:
+                self.insert_image_files_as_layers(url_paths)
+                return doc
+            opened_doc: Optional[DocumentSession] = None
+            for p in url_paths:
+                opened_doc = self.open_file(p)
+            return opened_doc
+
+        qimg = clipboard.image()
         if qimg.isNull():
             return None
 
         rgba = qimage_to_rgba_numpy(qimg)
         new_doc = self.tab_manager.new_document_from_rgba(
             rgba,
-            title=f"Clipboard-{len(self.tab_manager.sessions) + 1}",
+            title=f"{tr('doc.clipboard_prefix')}-{len(self.tab_manager.sessions) + 1}",
             activate=True,
         )
+        new_doc.modified = False
         self._sync_tabs()
         return new_doc
 
@@ -741,7 +869,7 @@ class MainWindow(QMainWindow):
         try:
             apply_ai_background_removal(doc)
         except Exception as exc:
-            QMessageBox.warning(self, "AI Background Removal", str(exc))
+            QMessageBox.warning(self, tr("action.ai_bg").replace("&", ""), str(exc))
             return
         self.layers_panel.refresh()
         self._refresh_canvas_and_tabs()
@@ -833,6 +961,11 @@ class MainWindow(QMainWindow):
     def _on_tool_options_changed(self) -> None:
         self.canvas_view.update()
 
+    def _on_crop_options_changed(self) -> None:
+        crop_tool = self.tools.get(ToolType.CROP.value)
+        if isinstance(crop_tool, CropTool):
+            crop_tool.apply_aspect_ratio_to_current_rect(self.active_document)
+
     def _on_tool_action_requested(self, action: str) -> None:
         doc = self.active_document
         tool = self.canvas_view.active_tool
@@ -844,16 +977,24 @@ class MainWindow(QMainWindow):
             self._refresh_canvas_and_tabs()
 
     def _on_cursor_moved(self, cx: float, cy: float) -> None:
-        self.status_cursor_label.setText(f"X: {int(round(cx))}, Y: {int(round(cy))}")
+        self.status_cursor_label.setText(
+            tr("status.cursor", x=int(round(cx)), y=int(round(cy)))
+        )
 
     def _on_zoom_changed(self, zoom: float) -> None:
-        self.status_zoom_label.setText(f"Zoom: {int(round(zoom * 100.0))}%")
+        self.status_zoom_label.setText(
+            tr("status.zoom", pct=int(round(zoom * 100.0)))
+        )
 
     def _update_status_bar(self) -> None:
         doc = self.active_document
         if doc is None:
-            self.status_zoom_label.setText("Zoom: --")
-            self.status_doc_label.setText("No document")
+            self.status_zoom_label.setText(tr("status.zoom_empty"))
+            self.status_doc_label.setText(tr("status.no_doc"))
         else:
-            self.status_zoom_label.setText(f"Zoom: {int(round(doc.viewport.zoom * 100.0))}%")
-            self.status_doc_label.setText(f"{doc.width} x {doc.height} px")
+            self.status_zoom_label.setText(
+                tr("status.zoom", pct=int(round(doc.viewport.zoom * 100.0)))
+            )
+            self.status_doc_label.setText(
+                tr("status.doc_size", w=doc.width, h=doc.height)
+            )

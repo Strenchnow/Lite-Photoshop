@@ -17,6 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
 def test_imports_and_lazy_loading() -> None:
     # Import all core, tool, UI, entry-point, and build modules
     import app  # noqa: F401
+    import app.config.i18n  # noqa: F401
     import app.core  # noqa: F401
     import app.core.ai_bg_remove  # noqa: F401
     import app.core.batch  # noqa: F401
@@ -254,19 +255,33 @@ def test_all_15_tools() -> None:
     marquee.mouse_release(sel_doc, 5.0, 5.0, button=1)
     assert sel_doc.selection_mask is None
 
-    # 8. LassoTool
+    # 8. LassoTool (live draw_overlay, rasterization, Shift-add, Alt-subtract, Esc deselect)
+    from PySide6.QtGui import QImage as _QImg, QPainter as _QPainter
+
     lasso = tools[ToolType.LASSO.value]
     assert isinstance(lasso, LassoTool)
     lasso.mouse_press(sel_doc, 10.0, 10.0, button=1)
     lasso.mouse_move(sel_doc, 50.0, 10.0, buttons=1)
     lasso.mouse_move(sel_doc, 30.0, 50.0, buttons=1)
+    overlay_img = _QImg(100, 100, _QImg.Format.Format_ARGB32)
+    overlay_painter = _QPainter(overlay_img)
+    lasso.draw_overlay(overlay_painter, sel_doc, sel_doc.viewport)
+    overlay_painter.end()
     lasso.mouse_release(sel_doc, 10.0, 10.0, button=1)
     assert sel_doc.selection_mask is not None
     assert sel_doc.selection_mask[25, 30] == 255
     assert sel_doc.selection_mask[5, 5] == 0
-    sel_doc.clear_selection()
+    # Shift add second triangle
+    lasso.mouse_press(sel_doc, 60.0, 60.0, button=1, modifiers=MOD_SHIFT)
+    lasso.mouse_move(sel_doc, 90.0, 60.0, buttons=1, modifiers=MOD_SHIFT)
+    lasso.mouse_move(sel_doc, 75.0, 90.0, buttons=1, modifiers=MOD_SHIFT)
+    lasso.mouse_release(sel_doc, 60.0, 60.0, button=1, modifiers=MOD_SHIFT)
+    assert sel_doc.selection_mask[25, 30] == 255 and sel_doc.selection_mask[70, 75] == 255
+    # Esc clears selection
+    assert lasso.key_press(sel_doc, Qt.Key_Escape) is True
+    assert sel_doc.selection_mask is None
 
-    # 9. MagicWandTool
+    # 9. MagicWandTool (active layer + multi-layer transparent active layer fallback)
     wand = tools[ToolType.MAGIC_WAND.value]
     assert isinstance(wand, MagicWandTool)
     sel_doc.active_layer.pixels[20:40, 20:40] = [10, 200, 220, 255]
@@ -275,19 +290,49 @@ def test_all_15_tools() -> None:
     wand.mouse_press(sel_doc, 25.0, 25.0, button=1)
     assert sel_doc.selection_mask is not None
     assert int(np.sum(sel_doc.selection_mask == 255)) == 400
+    assert wand.key_press(sel_doc, Qt.Key_Escape) is True
+    assert sel_doc.selection_mask is None
+
+    # Transparent top active layer clicking over visible bottom layer must still select visible artwork
+    top_empty = sel_doc.add_layer(name="EmptyTop")
+    assert sel_doc.active_layer is top_empty
+    wand.mouse_press(sel_doc, 25.0, 25.0, button=1)
+    assert sel_doc.selection_mask is not None
+    assert int(np.sum(sel_doc.selection_mask == 255)) == 400
     sel_doc.clear_selection()
 
-    # 10. CropTool (Esc cancel, Enter apply + undo)
+    # 10. CropTool (Esc cancel, Enter apply + undo, aspect ratio presets, swap, Shift free override)
     crop = tools[ToolType.CROP.value]
     assert isinstance(crop, CropTool)
     crop_doc = DocumentSession(100, 100, title="CropDoc")
     crop_doc.active_layer.pixels[20:40, 20:40] = [255, 0, 255, 255]
+    ctx.set_crop_preset("free")
     crop.mouse_press(crop_doc, 15.0, 15.0, button=1)
     crop.mouse_move(crop_doc, 55.0, 45.0, buttons=1)
     crop.mouse_release(crop_doc, 55.0, 45.0, button=1)
     assert crop.crop_rect == (15, 15, 40, 30)
     assert crop.key_press(crop_doc, Qt.Key_Escape) is True
     assert crop.crop_rect is None and (crop_doc.width, crop_doc.height) == (100, 100)
+
+    # Preset 16:9 + Swap -> 9:16 + Shift free override
+    ctx.set_crop_preset("16:9")
+    crop.mouse_press(crop_doc, 10.0, 10.0, button=1)
+    crop.mouse_move(crop_doc, 90.0, 90.0, buttons=1)
+    crop.mouse_release(crop_doc, 90.0, 90.0, button=1)
+    assert crop.crop_rect is not None
+    _, _, cw16, ch16 = crop.crop_rect
+    assert abs((cw16 / ch16) - (16.0 / 9.0)) < 0.08
+    assert ctx.swap_crop_orientation() == "9:16"
+    crop.apply_aspect_ratio_to_current_rect(crop_doc)
+    _, _, cw9, ch9 = crop.crop_rect
+    assert abs((cw9 / ch9) - (9.0 / 16.0)) < 0.08
+    # Holding Shift temporarily overrides locked ratio
+    crop.mouse_press(crop_doc, 10.0, 10.0, button=1, modifiers=MOD_SHIFT)
+    crop.mouse_move(crop_doc, 60.0, 30.0, buttons=1, modifiers=MOD_SHIFT)
+    crop.mouse_release(crop_doc, 60.0, 30.0, button=1, modifiers=MOD_SHIFT)
+    assert crop.crop_rect == (10, 10, 50, 20)
+    ctx.set_crop_preset("free")
+    crop.cancel_crop()
 
     crop.mouse_press(crop_doc, 15.0, 15.0, button=1)
     crop.mouse_release(crop_doc, 55.0, 45.0, button=1)
@@ -404,9 +449,18 @@ def test_main_window_canvas_panels_and_dialogs() -> None:
     # Verify strict lazy loading even after MainWindow creation
     assert "onnxruntime" not in sys.modules
 
+    # 0. Verify RU default localization, clean white background, and no '*' on untouched document
+    from app.config.i18n import get_language
+
+    assert get_language() == "ru"
+    assert "Слои" in win.layers_dock.windowTitle()
+    assert win.new_tab_btn.text() == "+"
+
     # 1. Multi-tab switching, inactive cache release, modified '*' title
     doc1 = win.active_document
     assert doc1 is not None
+    assert doc1.modified is False and not doc1.display_title.endswith("*")
+    assert tuple(doc1.active_layer.pixels[0, 0]) == (255, 255, 255, 255)
     doc1.composite()
     assert doc1._composited_cache is not None
 
@@ -525,11 +579,14 @@ def test_main_window_canvas_panels_and_dialogs() -> None:
     assert (clip_doc.viewport.pan_x, clip_doc.viewport.pan_y) == (pan_x0 + 40.0, pan_y0 + 25.0)
     assert cv.active_tool is win.tools[ToolType.BRUSH.value]
 
-    # 5. LayersPanel mask / clipping / blend-mode actions
+    # 5. LayersPanel mask / clipping / blend-mode / thumbnail / row height actions
     lp = win.layers_panel
     lp.set_document(clip_doc)
     new_layer = lp.add_layer()
     assert new_layer is not None and len(clip_doc.layers) == 2
+    assert lp.layer_list.item(0).sizeHint().height() >= 40
+    row_widget = lp.layer_list.itemWidget(lp.layer_list.item(0))
+    assert row_widget is not None and not row_widget.thumb_lbl.pixmap().isNull()
 
     mult_idx = lp.blend_combo.findData(BlendMode.MULTIPLY)
     assert mult_idx >= 0
@@ -606,7 +663,7 @@ def test_main_window_canvas_panels_and_dialogs() -> None:
         assert len(grid_tabs) == 4 and all((d.width, d.height) == (32, 32) for d in grid_tabs)
         grid_dlg.reject()
 
-        sprite_doc = win.new_document(64, 64, title="SpriteDoc")
+        sprite_doc = win.new_document(64, 64, title="SpriteDoc", initial_fill=(0, 0, 0, 0))
         sprite_doc.active_layer.pixels[4:16, 4:16] = [255, 0, 0, 255]
         sprite_doc.active_layer.pixels[32:48, 36:52] = [0, 255, 0, 255]
         previewed: list = []
@@ -688,16 +745,97 @@ def test_main_window_canvas_panels_and_dialogs() -> None:
         hk_dlg2.accept()
         assert load_keybindings(tmp_kb)["brush"] == "B"
 
-    # 11. Lazy AI background removal offline fallback check (still zero onnxruntime import)
+    # 11. Lazy AI background removal offline fallback check (still zero onnxruntime import until real ONNX run)
     ai_doc = win.new_document(40, 40, title="AITest", initial_fill=(0, 255, 0, 255))
     ai_doc.active_layer.pixels[10:30, 10:30] = [240, 30, 30, 255]
-    matte = generate_alpha_matte(ai_doc.active_layer.pixels, allow_download=False, offline_fallback=True)
+    missing_model = Path(tempfile.gettempdir()) / "nonexistent_u2netp_test.onnx"
+    matte = generate_alpha_matte(
+        ai_doc.active_layer.pixels,
+        model_path=missing_model,
+        allow_download=False,
+        offline_fallback=True,
+    )
     assert matte.shape == (40, 40) and matte[20, 20] > 200 and matte[0, 0] < 20
-    mask = apply_ai_background_removal(ai_doc, allow_download=False, offline_fallback=True)
+    mask = apply_ai_background_removal(
+        ai_doc,
+        model_path=missing_model,
+        allow_download=False,
+        offline_fallback=True,
+    )
     assert ai_doc.active_layer.mask is mask
     ai_doc.undo()
     assert ai_doc.active_layer.mask is None
     assert "onnxruntime" not in sys.modules
+
+    # 12. Vectorized CanvasView selection rendering at zoom < 1 + Crop UI presets + Drag&Drop + Clipboard URL + i18n switch
+    from PySide6.QtCore import QMimeData, QUrl
+    from PySide6.QtGui import QDropEvent
+
+    sel_mask = np.zeros((doc1.height, doc1.width), dtype=np.uint8)
+    sel_mask[100:180, 100:220] = 255
+    sel_mask[110:150, 120:160] = 0  # Non-rectangular hollow selection
+    doc1.set_selection_mask(sel_mask)
+    doc1.viewport.zoom = 0.4
+    win.switch_to_tab(0)
+    win.canvas_view._invalidate_selection_cache()
+    win.canvas_view.repaint()
+    qapp.processEvents()
+    assert win.canvas_view._sel_segments_np is not None and win.canvas_view._sel_segments_np.shape[0] >= 8
+    doc1.clear_selection()
+
+    # Crop UI preset & swap orientation
+    win.select_tool(ToolType.CROP.value)
+    idx_169 = win.tool_options_bar.crop_ratio_combo.findData("16:9")
+    assert idx_169 >= 0
+    win.tool_options_bar.crop_ratio_combo.setCurrentIndex(idx_169)
+    assert win.tool_context.crop_aspect_preset == "16:9"
+    win.tool_options_bar.btn_crop_swap.click()
+    assert win.tool_context.crop_aspect_preset == "9:16"
+    win.tools[ToolType.CROP.value].cancel_crop()
+
+    # Drag & Drop onto Canvas (new centered layer with Undo) and onto MainWindow (new tab) + Explorer Ctrl+V URL paste
+    with tempfile.TemporaryDirectory() as dnd_dir:
+        from PIL import Image as _PILImage
+
+        drop_img_path = Path(dnd_dir) / "dropped_sprite.png"
+        arr = np.full((24, 32, 4), [0, 200, 255, 255], dtype=np.uint8)
+        _PILImage.fromarray(arr, mode="RGBA").save(drop_img_path)
+
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(drop_img_path))])
+
+        # Drop onto CanvasView -> inserts centered layer
+        prev_layers = len(doc1.layers)
+        drop_ev = QDropEvent(QPointF(50, 50), Qt.DropAction.CopyAction, mime, Qt.MouseButton.LeftButton, Qt.NoModifier)
+        win.canvas_view.dropEvent(drop_ev)
+        assert len(doc1.layers) == prev_layers + 1
+        assert doc1.active_layer.name == "dropped_sprite"
+        doc1.undo()
+        assert len(doc1.layers) == prev_layers
+
+        # Drop onto MainWindow -> opens new tab
+        prev_tabs = len(win.tab_manager.sessions)
+        win_drop_ev = QDropEvent(QPointF(10, 10), Qt.DropAction.CopyAction, mime, Qt.MouseButton.LeftButton, Qt.NoModifier)
+        win.dropEvent(win_drop_ev)
+        assert len(win.tab_manager.sessions) == prev_tabs + 1
+        assert win.active_document.title == "dropped_sprite.png"
+        assert win.active_document.modified is False
+
+        # Clipboard file URL paste (Explorer Ctrl+C -> Ctrl+V)
+        url_mime = QMimeData()
+        url_mime.setUrls([QUrl.fromLocalFile(str(drop_img_path))])
+        QGuiApplication.clipboard().setMimeData(url_mime)
+        target_doc = win.active_document
+        layers_before_paste = len(target_doc.layers)
+        win.paste_from_clipboard()
+        assert len(target_doc.layers) == layers_before_paste + 1
+        QGuiApplication.clipboard().clear()
+
+    # Language switch RU -> EN -> RU (non-persistent in test)
+    win.set_language("en", persist=False)
+    assert "Layers" in win.layers_dock.windowTitle()
+    win.set_language("ru", persist=False)
+    assert "Слои" in win.layers_dock.windowTitle()
 
     win.close()
     qapp.processEvents()

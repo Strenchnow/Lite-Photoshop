@@ -10,3 +10,4 @@ build/
 dist/
 *.spec
 assets/models/*.onnx
+app/config/ui_settings.json

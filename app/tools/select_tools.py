@@ -12,6 +12,7 @@ from app.core.document import CallableCommand
 from app.core.layer import LayerMask
 from app.tools.base_tool import (
     MOD_ALT,
+    MOD_CTRL,
     MOD_SHIFT,
     BaseTool,
     ToolContext,
@@ -27,6 +28,23 @@ if TYPE_CHECKING:
 _KEY_ESCAPE = 0x01000000
 _KEY_RETURN = 0x01000004
 _KEY_ENTER = 0x01000005
+_KEY_D = 0x44
+
+
+def _handle_selection_deselect_key(
+    doc: "DocumentSession",
+    context: ToolContext,
+    key: int,
+    modifiers: int,
+) -> bool:
+    k = extract_key(key)
+    mods = extract_modifiers(modifiers)
+    if k == _KEY_ESCAPE or ((mods & MOD_CTRL) and k == _KEY_D):
+        if doc.selection_mask is not None:
+            doc.clear_selection()
+            context.notify_canvas_invalidated()
+            return True
+    return False
 
 
 def _combine_selection(
@@ -83,6 +101,44 @@ def _rasterize_polygon_scanline(
             if x1 >= x0:
                 mask[y, x0 : x1 + 1] = 255
     return mask
+
+
+def _rasterize_polygon(
+    width: int,
+    height: int,
+    points: list[tuple[float, float]],
+) -> np.ndarray:
+    """Rasterize a closed polygon into a uint8 (H, W) mask using Qt when available or scanline."""
+    if len(points) < 3 or width <= 0 or height <= 0:
+        return np.zeros((max(1, height), max(1, width)), dtype=np.uint8)[:height, :width]
+
+    try:
+        from PySide6.QtCore import QPointF, Qt
+        from PySide6.QtGui import QColor, QGuiApplication, QImage, QPainter, QPainterPath
+
+        if QGuiApplication.instance() is not None:
+            img = QImage(width, height, QImage.Format.Format_Grayscale8)
+            img.fill(0)
+            path = QPainterPath()
+            path.setFillRule(Qt.FillRule.OddEvenFill)
+            path.moveTo(QPointF(points[0][0], points[0][1]))
+            for px, py in points[1:]:
+                path.lineTo(QPointF(px, py))
+            path.closeSubpath()
+
+            painter = QPainter(img)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+            painter.fillPath(path, QColor(255, 255, 255))
+            painter.end()
+
+            bpl = img.bytesPerLine()
+            raw = np.frombuffer(img.constBits(), dtype=np.uint8, count=height * bpl).reshape((height, bpl))
+            mask = np.ascontiguousarray(np.where(raw[:, :width] >= 128, np.uint8(255), np.uint8(0)))
+            return mask
+    except Exception:
+        pass
+
+    return _rasterize_polygon_scanline(width, height, points)
 
 
 def _bilinear_resample_rotated_rgba(
@@ -309,6 +365,14 @@ class RectMarqueeTool(BaseTool):
 
         self.context.notify_canvas_invalidated()
 
+    def key_press(
+        self,
+        doc: "DocumentSession",
+        key: int,
+        modifiers: int = 0,
+    ) -> bool:
+        return _handle_selection_deselect_key(doc, self.context, key, modifiers)
+
     def draw_overlay(
         self,
         painter: Any,
@@ -378,7 +442,7 @@ class LassoTool(BaseTool):
         if not self._dragging or (btn != 0 and (btn & 1) == 0):
             return
         pt = (float(cx), float(cy))
-        if not self._points or math.hypot(pt[0] - self._points[-1][0], pt[1] - self._points[-1][1]) >= 1.0:
+        if not self._points or math.hypot(pt[0] - self._points[-1][0], pt[1] - self._points[-1][1]) >= 0.5:
             self._points.append(pt)
         self.context.notify_canvas_invalidated()
 
@@ -396,7 +460,7 @@ class LassoTool(BaseTool):
             return
         self._dragging = False
         pt = (float(cx), float(cy))
-        if not self._points or math.hypot(pt[0] - self._points[-1][0], pt[1] - self._points[-1][1]) >= 0.5:
+        if not self._points or math.hypot(pt[0] - self._points[-1][0], pt[1] - self._points[-1][1]) >= 0.25:
             self._points.append(pt)
 
         mods = self._press_mods | extract_modifiers(modifiers)
@@ -409,7 +473,7 @@ class LassoTool(BaseTool):
             self.context.notify_canvas_invalidated()
             return
 
-        poly_mask = _rasterize_polygon_scanline(doc.width, doc.height, pts)
+        poly_mask = _rasterize_polygon(doc.width, doc.height, pts)
         if np.any(poly_mask):
             _combine_selection(doc, poly_mask, mods)
         elif not (mods & (MOD_SHIFT | MOD_ALT)):
@@ -417,23 +481,49 @@ class LassoTool(BaseTool):
 
         self.context.notify_canvas_invalidated()
 
+    def key_press(
+        self,
+        doc: "DocumentSession",
+        key: int,
+        modifiers: int = 0,
+    ) -> bool:
+        k = extract_key(key)
+        if k == _KEY_ESCAPE and self._dragging:
+            self._dragging = False
+            self._points.clear()
+            self.context.notify_canvas_invalidated()
+            return True
+        return _handle_selection_deselect_key(doc, self.context, key, modifiers)
+
     def draw_overlay(
         self,
         painter: Any,
         doc: "DocumentSession",
         viewport: "ViewportTransform",
     ) -> None:
-        if not self._dragging or len(self._points) < 2 or painter is None:
+        if not self._dragging or not self._points or painter is None:
             return
         from PySide6.QtCore import QPointF, Qt
         from PySide6.QtGui import QColor, QPen, QPolygonF
 
-        poly = QPolygonF([QPointF(*viewport.canvas_to_screen(x, y)) for x, y in self._points])
+        screen_pts = [QPointF(*viewport.canvas_to_screen(x, y)) for x, y in self._points]
         painter.save()
-        painter.setPen(QPen(QColor(0, 0, 0, 210), 2.0))
-        painter.drawPolyline(poly)
-        painter.setPen(QPen(QColor(255, 255, 255, 240), 1.0, Qt.PenStyle.DashLine))
-        painter.drawPolyline(poly)
+        if len(screen_pts) >= 2:
+            poly = QPolygonF(screen_pts)
+            painter.setPen(QPen(QColor(0, 0, 0, 220), 2.0))
+            painter.drawPolyline(poly)
+            dash_pen = QPen(QColor(255, 255, 255, 245), 1.25, Qt.PenStyle.DashLine)
+            painter.setPen(dash_pen)
+            painter.drawPolyline(poly)
+            # Closing preview segment back to the initial point
+            close_pen = QPen(QColor(0, 210, 255, 210), 1.25, Qt.PenStyle.DotLine)
+            painter.setPen(close_pen)
+            painter.drawLine(screen_pts[-1], screen_pts[0])
+
+        # Highlight start anchor point
+        painter.setPen(QPen(QColor(0, 0, 0, 220), 1.0))
+        painter.setBrush(QColor(255, 255, 255, 240))
+        painter.drawEllipse(screen_pts[0], 3.5, 3.5)
         painter.restore()
 
     def on_deactivate(self, doc: Optional["DocumentSession"] = None) -> None:
@@ -477,40 +567,53 @@ class MagicWandTool(BaseTool):
         canvas_mask: Optional[np.ndarray] = None
         count = 0
 
+        use_layer = False
         if layer is not None and layer.visible:
             lx = ix - layer.offset_x
             ly = iy - layer.offset_y
             if 0 <= lx < layer.width and 0 <= ly < layer.height:
-                local_mask, count, _ = engine.magic_wand(
-                    layer.pixels,
-                    seed_x=lx,
-                    seed_y=ly,
-                    tolerance=tol,
-                    contiguous=contiguous,
-                )
-                if count > 0:
-                    if (
-                        layer.offset_x == 0
-                        and layer.offset_y == 0
-                        and layer.width == doc.width
-                        and layer.height == doc.height
-                    ):
-                        canvas_mask = local_mask
-                    else:
-                        canvas_mask = np.zeros((doc.height, doc.width), dtype=np.uint8)
-                        cx0 = max(0, layer.offset_x)
-                        cy0 = max(0, layer.offset_y)
-                        cx1 = min(doc.width, layer.offset_x + layer.width)
-                        cy1 = min(doc.height, layer.offset_y + layer.height)
-                        if cx1 > cx0 and cy1 > cy0:
-                            sx0 = cx0 - layer.offset_x
-                            sy0 = cy0 - layer.offset_y
-                            canvas_mask[cy0:cy1, cx0:cx1] = local_mask[
-                                sy0 : sy0 + (cy1 - cy0), sx0 : sx0 + (cx1 - cx0)
-                            ]
+                # Sample active layer directly when opaque there, or when single-layer document
+                if layer.pixels[ly, lx, 3] > 0 or len(doc.layers) == 1:
+                    use_layer = True
+                else:
+                    comp_check = doc.composite()
+                    if comp_check[iy, ix, 3] == 0:
+                        use_layer = True
+
+        if use_layer and layer is not None:
+            lx = ix - layer.offset_x
+            ly = iy - layer.offset_y
+            src_pixels = np.ascontiguousarray(layer.pixels, dtype=np.uint8)
+            local_mask, count, _ = engine.magic_wand(
+                src_pixels,
+                seed_x=lx,
+                seed_y=ly,
+                tolerance=tol,
+                contiguous=contiguous,
+            )
+            if count > 0:
+                if (
+                    layer.offset_x == 0
+                    and layer.offset_y == 0
+                    and layer.width == doc.width
+                    and layer.height == doc.height
+                ):
+                    canvas_mask = local_mask
+                else:
+                    canvas_mask = np.zeros((doc.height, doc.width), dtype=np.uint8)
+                    cx0 = max(0, layer.offset_x)
+                    cy0 = max(0, layer.offset_y)
+                    cx1 = min(doc.width, layer.offset_x + layer.width)
+                    cy1 = min(doc.height, layer.offset_y + layer.height)
+                    if cx1 > cx0 and cy1 > cy0:
+                        sx0 = cx0 - layer.offset_x
+                        sy0 = cy0 - layer.offset_y
+                        canvas_mask[cy0:cy1, cx0:cx1] = local_mask[
+                            sy0 : sy0 + (cy1 - cy0), sx0 : sx0 + (cx1 - cx0)
+                        ]
 
         if canvas_mask is None:
-            comp = doc.composite()
+            comp = np.ascontiguousarray(doc.composite(), dtype=np.uint8)
             canvas_mask, count, _ = engine.magic_wand(
                 comp,
                 seed_x=ix,
@@ -526,9 +629,17 @@ class MagicWandTool(BaseTool):
 
         self.context.notify_canvas_invalidated()
 
+    def key_press(
+        self,
+        doc: "DocumentSession",
+        key: int,
+        modifiers: int = 0,
+    ) -> bool:
+        return _handle_selection_deselect_key(doc, self.context, key, modifiers)
+
 
 class CropTool(BaseTool):
-    """Interactive crop rectangle tool with Enter to commit (undoable) and Esc to cancel."""
+    """Interactive crop rectangle tool with aspect ratio presets, handles, Enter to apply, Esc to cancel."""
 
     tool_id = ToolType.CROP.value
     name = "Crop"
@@ -538,17 +649,209 @@ class CropTool(BaseTool):
         super().__init__(context)
         self.crop_rect: Optional[tuple[int, int, int, int]] = None
         self._dragging = False
+        self._drag_mode: str = "create"
         self._start: tuple[float, float] = (0.0, 0.0)
+        self._orig_rect: Optional[tuple[int, int, int, int]] = None
 
-    def _update_rect(self, doc: "DocumentSession", x0f: float, y0f: float, x1f: float, y1f: float) -> None:
-        x0 = max(0, min(doc.width, int(round(min(x0f, x1f)))))
-        y0 = max(0, min(doc.height, int(round(min(y0f, y1f)))))
-        x1 = max(0, min(doc.width, int(round(max(x0f, x1f)))))
-        y1 = max(0, min(doc.height, int(round(max(y0f, y1f)))))
-        if x1 > x0 and y1 > y0:
-            self.crop_rect = (x0, y0, x1 - x0, y1 - y0)
+    @staticmethod
+    def _constrain_from_anchor(
+        doc: "DocumentSession",
+        ax: float,
+        ay: float,
+        cx: float,
+        cy: float,
+        target_ratio: Optional[float],
+    ) -> Optional[tuple[int, int, int, int]]:
+        ax_c = max(0.0, min(float(doc.width), ax))
+        ay_c = max(0.0, min(float(doc.height), ay))
+        sx = 1 if cx >= ax_c else -1
+        sy = 1 if cy >= ay_c else -1
+        max_w = (float(doc.width) - ax_c) if sx > 0 else ax_c
+        max_h = (float(doc.height) - ay_c) if sy > 0 else ay_c
+
+        raw_w = min(max_w, abs(cx - ax_c))
+        raw_h = min(max_h, abs(cy - ay_c))
+
+        if target_ratio is None or target_ratio <= 0.0:
+            w, h = raw_w, raw_h
         else:
-            self.crop_rect = None
+            if raw_w / max(raw_h, 1e-6) >= target_ratio:
+                w = raw_w
+                h = w / target_ratio
+            else:
+                h = raw_h
+                w = h * target_ratio
+            if w > max_w:
+                w = max_w
+                h = w / target_ratio
+            if h > max_h:
+                h = max_h
+                w = h * target_ratio
+
+        cw = int(round(w))
+        ch = int(round(h))
+        if cw <= 0 or ch <= 0:
+            return None
+        x0 = int(round(ax_c)) if sx > 0 else int(round(ax_c)) - cw
+        y0 = int(round(ay_c)) if sy > 0 else int(round(ay_c)) - ch
+        x0 = max(0, min(doc.width - cw, x0))
+        y0 = max(0, min(doc.height - ch, y0))
+        return (x0, y0, cw, ch)
+
+    def _handle_positions(self) -> dict[str, tuple[float, float]]:
+        if self.crop_rect is None:
+            return {}
+        x, y, w, h = self.crop_rect
+        mx = x + w * 0.5
+        my = y + h * 0.5
+        return {
+            "nw": (float(x), float(y)),
+            "n": (mx, float(y)),
+            "ne": (float(x + w), float(y)),
+            "e": (float(x + w), my),
+            "se": (float(x + w), float(y + h)),
+            "s": (mx, float(y + h)),
+            "sw": (float(x), float(y + h)),
+            "w": (float(x), my),
+        }
+
+    def _hit_test(self, cx: float, cy: float, zoom: float) -> Optional[str]:
+        if self.crop_rect is None:
+            return None
+        hit_r = 10.0 / max(float(zoom), 1e-3)
+        for name, (hx, hy) in self._handle_positions().items():
+            if math.hypot(cx - hx, cy - hy) <= hit_r:
+                return name
+        x, y, w, h = self.crop_rect
+        if x <= cx <= x + w and y <= cy <= y + h:
+            return "move"
+        return None
+
+    def _update_drag(
+        self,
+        doc: "DocumentSession",
+        cx: float,
+        cy: float,
+        modifiers: int,
+    ) -> None:
+        mods = extract_modifiers(modifiers)
+        ratio_pair = None if (mods & MOD_SHIFT) else self.context.crop_aspect_ratio
+        target = (ratio_pair[0] / ratio_pair[1]) if (ratio_pair is not None and ratio_pair[1] > 0) else None
+
+        if self._drag_mode == "create":
+            self.crop_rect = self._constrain_from_anchor(
+                doc, self._start[0], self._start[1], cx, cy, target
+            )
+            return
+
+        if self._orig_rect is None:
+            return
+        ox, oy, ow, oh = self._orig_rect
+
+        if self._drag_mode == "move":
+            dx = int(round(cx - self._start[0]))
+            dy = int(round(cy - self._start[1]))
+            nx = max(0, min(doc.width - ow, ox + dx))
+            ny = max(0, min(doc.height - oh, oy + dy))
+            self.crop_rect = (nx, ny, ow, oh)
+            return
+
+        # Corner handles use the opposite corner as anchor
+        corner_anchors = {
+            "nw": (float(ox + ow), float(oy + oh)),
+            "ne": (float(ox), float(oy + oh)),
+            "se": (float(ox), float(oy)),
+            "sw": (float(ox + ow), float(oy)),
+        }
+        if self._drag_mode in corner_anchors:
+            ax, ay = corner_anchors[self._drag_mode]
+            self.crop_rect = self._constrain_from_anchor(doc, ax, ay, cx, cy, target)
+            return
+
+        # Edge handles
+        x0, y0, x1, y1 = float(ox), float(oy), float(ox + ow), float(oy + oh)
+        if self._drag_mode == "w":
+            x0 = max(0.0, min(x1 - 1.0, cx))
+        elif self._drag_mode == "e":
+            x1 = min(float(doc.width), max(x0 + 1.0, cx))
+        elif self._drag_mode == "n":
+            y0 = max(0.0, min(y1 - 1.0, cy))
+        elif self._drag_mode == "s":
+            y1 = min(float(doc.height), max(y0 + 1.0, cy))
+
+        nw = x1 - x0
+        nh = y1 - y0
+        if target is not None and target > 0.0:
+            if self._drag_mode in ("w", "e"):
+                nh = nw / target
+                if nh > float(doc.height):
+                    nh = float(doc.height)
+                    nw = nh * target
+                    if self._drag_mode == "w":
+                        x0 = x1 - nw
+                    else:
+                        x1 = x0 + nw
+                cy_mid = oy + oh * 0.5
+                y0 = max(0.0, min(float(doc.height) - nh, cy_mid - nh * 0.5))
+                y1 = y0 + nh
+            else:
+                nw = nh * target
+                if nw > float(doc.width):
+                    nw = float(doc.width)
+                    nh = nw / target
+                    if self._drag_mode == "n":
+                        y0 = y1 - nh
+                    else:
+                        y1 = y0 + nh
+                cx_mid = ox + ow * 0.5
+                x0 = max(0.0, min(float(doc.width) - nw, cx_mid - nw * 0.5))
+                x1 = x0 + nw
+
+        ix0 = max(0, min(doc.width, int(round(x0))))
+        iy0 = max(0, min(doc.height, int(round(y0))))
+        ix1 = max(0, min(doc.width, int(round(x1))))
+        iy1 = max(0, min(doc.height, int(round(y1))))
+        if ix1 > ix0 and iy1 > iy0:
+            self.crop_rect = (ix0, iy0, ix1 - ix0, iy1 - iy0)
+
+    def apply_aspect_ratio_to_current_rect(self, doc: Optional["DocumentSession"]) -> None:
+        """Fit existing crop_rect (or full canvas if none) to context.crop_aspect_ratio."""
+        if doc is None:
+            return
+        ratio_pair = self.context.crop_aspect_ratio
+        if ratio_pair is None or ratio_pair[1] <= 0:
+            self.context.notify_canvas_invalidated()
+            return
+        target = ratio_pair[0] / ratio_pair[1]
+
+        if self.crop_rect is None:
+            base_w, base_h = float(doc.width), float(doc.height)
+            mid_x, mid_y = base_w * 0.5, base_h * 0.5
+        else:
+            rx, ry, rw, rh = self.crop_rect
+            base_w, base_h = float(rw), float(rh)
+            mid_x, mid_y = rx + rw * 0.5, ry + rh * 0.5
+
+        if base_w / max(base_h, 1e-6) >= target:
+            nh = base_h
+            nw = nh * target
+        else:
+            nw = base_w
+            nh = nw / target
+
+        if nw > doc.width:
+            nw = float(doc.width)
+            nh = nw / target
+        if nh > doc.height:
+            nh = float(doc.height)
+            nw = nh * target
+
+        cw = max(1, min(doc.width, int(round(nw))))
+        ch = max(1, min(doc.height, int(round(nh))))
+        x0 = max(0, min(doc.width - cw, int(round(mid_x - cw * 0.5))))
+        y0 = max(0, min(doc.height - ch, int(round(mid_y - ch * 0.5))))
+        self.crop_rect = (x0, y0, cw, ch)
+        self.context.notify_canvas_invalidated()
 
     def mouse_press(
         self,
@@ -562,9 +865,16 @@ class CropTool(BaseTool):
     ) -> None:
         if extract_button(button) != 1:
             return
+        hit = self._hit_test(float(cx), float(cy), doc.viewport.zoom)
         self._dragging = True
         self._start = (float(cx), float(cy))
-        self.crop_rect = None
+        if hit is not None and self.crop_rect is not None:
+            self._drag_mode = hit
+            self._orig_rect = self.crop_rect
+        else:
+            self._drag_mode = "create"
+            self._orig_rect = None
+            self.crop_rect = None
         self.context.notify_canvas_invalidated()
 
     def mouse_move(
@@ -580,7 +890,7 @@ class CropTool(BaseTool):
         btn = extract_button(buttons)
         if not self._dragging or (btn != 0 and (btn & 1) == 0):
             return
-        self._update_rect(doc, self._start[0], self._start[1], float(cx), float(cy))
+        self._update_drag(doc, float(cx), float(cy), modifiers)
         self.context.notify_canvas_invalidated()
 
     def mouse_release(
@@ -596,7 +906,8 @@ class CropTool(BaseTool):
         if not self._dragging:
             return
         self._dragging = False
-        self._update_rect(doc, self._start[0], self._start[1], float(cx), float(cy))
+        self._update_drag(doc, float(cx), float(cy), modifiers)
+        self._orig_rect = None
         self.context.notify_canvas_invalidated()
 
     def apply_crop(self, doc: "DocumentSession") -> bool:
@@ -656,6 +967,7 @@ class CropTool(BaseTool):
     def cancel_crop(self) -> None:
         self.crop_rect = None
         self._dragging = False
+        self._orig_rect = None
         self.context.notify_canvas_invalidated()
 
     def key_press(
@@ -699,7 +1011,7 @@ class CropTool(BaseTool):
         inner.addRect(crop_qrect)
         painter.fillPath(shade.subtracted(inner), QColor(0, 0, 0, 128))
 
-        painter.setPen(QPen(QColor(255, 255, 255, 230), 1.5))
+        painter.setPen(QPen(QColor(255, 255, 255, 240), 1.5))
         painter.drawRect(crop_qrect)
 
         # Rule of thirds guides
@@ -709,6 +1021,13 @@ class CropTool(BaseTool):
             gy = crop_qrect.top() + crop_qrect.height() * frac
             painter.drawLine(int(gx), int(crop_qrect.top()), int(gx), int(crop_qrect.bottom()))
             painter.drawLine(int(crop_qrect.left()), int(gy), int(crop_qrect.right()), int(gy))
+
+        # Corner & edge handles
+        painter.setBrush(QColor(255, 255, 255, 245))
+        painter.setPen(QPen(QColor(0, 120, 215, 255), 1.25))
+        for hx, hy in self._handle_positions().values():
+            hsx, hsy = viewport.canvas_to_screen(hx, hy)
+            painter.drawRect(QRectF(hsx - 4.0, hsy - 4.0, 8.0, 8.0))
         painter.restore()
 
     def on_deactivate(self, doc: Optional["DocumentSession"] = None) -> None:

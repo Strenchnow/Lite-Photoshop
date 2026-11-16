@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Optional
 
 from app.tools.base_tool import (
+    CROP_ASPECT_PRESETS,
     MOD_ALT,
     MOD_CTRL,
     MOD_NONE,
@@ -68,6 +69,7 @@ def create_default_tools(context: Optional[ToolContext] = None) -> dict[str, Bas
 
 
 __all__ = [
+    "CROP_ASPECT_PRESETS",
     "MOD_NONE",
     "MOD_SHIFT",
     "MOD_CTRL",

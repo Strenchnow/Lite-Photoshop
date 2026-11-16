@@ -32,10 +32,20 @@ def resolve_asset_path(relative: str) -> Path:
 
 
 def load_stylesheet(app: QApplication, relative_qss: str = "app/ui/theme.qss") -> bool:
-    """Load and apply the dark QSS theme onto QApplication."""
+    """Load and apply the dark QSS theme onto QApplication with resolved icon URLs."""
+    import re
+
     qss_path = resolve_asset_path(relative_qss)
     if qss_path.is_file():
-        app.setStyleSheet(qss_path.read_text(encoding="utf-8"))
+        qss_text = qss_path.read_text(encoding="utf-8")
+
+        def _rewrite_url(match: re.Match[str]) -> str:
+            rel = match.group(1).strip().strip("\"'")
+            resolved = resolve_asset_path(rel).as_posix()
+            return f"url({resolved})"
+
+        qss_text = re.sub(r"url\(([^)]+)\)", _rewrite_url, qss_text)
+        app.setStyleSheet(qss_text)
         return True
     return False
 

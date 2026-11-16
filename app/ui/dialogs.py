@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.config.i18n import tr
 from app.core.batch import BatchOperationConfig, BatchProcessor, BatchResult
 from app.core.c_bridge import ComponentBox, get_engine
 from app.core.document import DocumentSession, DocumentTabManager, compute_dirty_rect
@@ -246,7 +247,7 @@ class QuickExportDialog(QDialog):
         self.last_encoded_bytes: bytes = b""
         self.exported_path: Optional[Path] = None
 
-        self.setWindowTitle("Quick Export")
+        self.setWindowTitle(tr("export.title"))
         self.setMinimumWidth(460)
         self._build_ui()
         self.update_preview()
@@ -265,7 +266,7 @@ class QuickExportDialog(QDialog):
         root.addWidget(self.preview_label)
 
         info_row = QHBoxLayout()
-        self.size_label = QLabel("Estimated Size: 0.00 KB")
+        self.size_label = QLabel(tr("export.est_size", size="0.00 KB"))
         self.size_label.setStyleSheet("font-weight: 600;")
         self.dimensions_label = QLabel(f"{self.doc.width} x {self.doc.height} px")
         self.dimensions_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -277,7 +278,7 @@ class QuickExportDialog(QDialog):
 
         self.format_combo = QComboBox()
         self.format_combo.addItems(["PNG", "JPEG", "WEBP"])
-        form.addRow("Format:", self.format_combo)
+        form.addRow(tr("export.format"), self.format_combo)
 
         q_row = QHBoxLayout()
         self.quality_slider = QSlider(Qt.Orientation.Horizontal)
@@ -288,7 +289,7 @@ class QuickExportDialog(QDialog):
         self.quality_spin.setValue(90)
         q_row.addWidget(self.quality_slider, 1)
         q_row.addWidget(self.quality_spin)
-        form.addRow("Quality:", q_row)
+        form.addRow(tr("export.quality"), q_row)
 
         s_row = QHBoxLayout()
         self.scale_slider = QSlider(Qt.Orientation.Horizontal)
@@ -300,13 +301,13 @@ class QuickExportDialog(QDialog):
         self.scale_spin.setValue(100)
         s_row.addWidget(self.scale_slider, 1)
         s_row.addWidget(self.scale_spin)
-        form.addRow("Scale:", s_row)
+        form.addRow(tr("export.scale"), s_row)
 
         root.addLayout(form)
 
         buttons = QDialogButtonBox()
-        self.export_btn = buttons.addButton("Export...", QDialogButtonBox.ButtonRole.AcceptRole)
-        self.cancel_btn = buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
+        self.export_btn = buttons.addButton(tr("export.btn"), QDialogButtonBox.ButtonRole.AcceptRole)
+        self.cancel_btn = buttons.addButton(tr("dlg.cancel"), QDialogButtonBox.ButtonRole.RejectRole)
         root.addWidget(buttons)
 
         self.format_combo.currentTextChanged.connect(self._on_format_changed)
@@ -368,7 +369,7 @@ class QuickExportDialog(QDialog):
 
         out_w = max(1, int(round(self.doc.width * scale / 100.0)))
         out_h = max(1, int(round(self.doc.height * scale / 100.0)))
-        self.size_label.setText(f"Estimated Size: {format_byte_size(len(data))}")
+        self.size_label.setText(tr("export.est_size", size=format_byte_size(len(data))))
         self.dimensions_label.setText(f"{out_w} x {out_h} px ({fmt})")
 
         pix = QPixmap()
@@ -392,7 +393,7 @@ class QuickExportDialog(QDialog):
             default_name = f"{self.doc.title}.{ext}"
             chosen, _ = QFileDialog.getSaveFileName(
                 self,
-                "Export Image",
+                tr("export.save_title"),
                 default_name,
                 f"{fmt} Files (*.{ext});;All Files (*)",
             )
@@ -430,7 +431,7 @@ class ChromaKeyDialog(QDialog):
         )
         self._finalized = False
 
-        self.setWindowTitle("Chroma Key (Green / Solid Screen)")
+        self.setWindowTitle(tr("chroma.title"))
         self.setMinimumWidth(440)
         self._build_ui()
         self.apply_preview()
@@ -444,7 +445,7 @@ class ChromaKeyDialog(QDialog):
         self.preview_label.setStyleSheet("background: #232328; border: 1px solid #3c3c44; border-radius: 4px;")
         root.addWidget(self.preview_label)
 
-        color_group = QGroupBox("Key Color")
+        color_group = QGroupBox(tr("chroma.key_color"))
         color_layout = QHBoxLayout(color_group)
 
         self.color_btn = QPushButton()
@@ -463,7 +464,7 @@ class ChromaKeyDialog(QDialog):
             color_layout.addWidget(spin)
 
         color_layout.addWidget(self.color_btn)
-        self.sample_corner_btn = QPushButton("Eyedropper (Corner)")
+        self.sample_corner_btn = QPushButton(tr("chroma.eyedropper_corner"))
         color_layout.addWidget(self.sample_corner_btn)
         root.addWidget(color_group)
 
@@ -473,33 +474,31 @@ class ChromaKeyDialog(QDialog):
         tol_row = QHBoxLayout()
         tol_row.addWidget(self.tolerance_slider, 1)
         tol_row.addWidget(self.tolerance_spin)
-        form.addRow("Tolerance:", tol_row)
+        form.addRow(tr("chroma.tolerance"), tol_row)
 
         self.softness_slider, self.softness_spin = self._make_slider_pair(0, 255, 20)
         soft_row = QHBoxLayout()
         soft_row.addWidget(self.softness_slider, 1)
         soft_row.addWidget(self.softness_spin)
-        form.addRow("Edge Softness:", soft_row)
+        form.addRow(tr("chroma.softness"), soft_row)
 
         self.despill_slider, self.despill_spin = self._make_slider_pair(0, 100, 50)
         self.despill_spin.setSuffix("%")
         desp_row = QHBoxLayout()
         desp_row.addWidget(self.despill_slider, 1)
         desp_row.addWidget(self.despill_spin)
-        form.addRow("Despill:", desp_row)
+        form.addRow(tr("chroma.despill"), desp_row)
 
         root.addLayout(form)
 
         if self._original_pixels is None:
-            warn = QLabel("Active layer is missing or locked; chroma key cannot edit pixels.")
+            warn = QLabel(tr("chroma.locked_warn"))
             warn.setStyleSheet("color: #f0a040;")
             root.addWidget(warn)
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        self.apply_btn = buttons.button(QDialogButtonBox.StandardButton.Ok)
-        self.apply_btn.setText("Apply")
+        buttons = QDialogButtonBox()
+        self.apply_btn = buttons.addButton(tr("dlg.apply"), QDialogButtonBox.ButtonRole.AcceptRole)
+        self.cancel_btn = buttons.addButton(tr("dlg.cancel"), QDialogButtonBox.ButtonRole.RejectRole)
         self.apply_btn.setEnabled(self._original_pixels is not None)
         root.addWidget(buttons)
 
@@ -565,7 +564,7 @@ class ChromaKeyDialog(QDialog):
 
     def _pick_color_dialog(self) -> None:
         initial = QColor(*self.key_rgb)
-        chosen = QColorDialog.getColor(initial, self, "Pick Chroma Key Color")
+        chosen = QColorDialog.getColor(initial, self, tr("chroma.pick_color_title"))
         if chosen.isValid():
             self.set_key_color(chosen.red(), chosen.green(), chosen.blue())
 
@@ -657,7 +656,7 @@ class GridSplitterDialog(QDialog):
         self.doc = doc
         self.tab_manager = tab_manager
 
-        self.setWindowTitle("Grid Image Splitter")
+        self.setWindowTitle(tr("grid.title"))
         self.setMinimumWidth(400)
         self._build_ui()
         self._update_summary()
@@ -667,13 +666,14 @@ class GridSplitterDialog(QDialog):
 
         form = QFormLayout()
         self.source_combo = QComboBox()
-        self.source_combo.addItems(["Composited Canvas", "Active Layer"])
-        form.addRow("Source:", self.source_combo)
+        self.source_combo.addItem(tr("dlg.source_canvas"), "canvas")
+        self.source_combo.addItem(tr("dlg.source_layer"), "layer")
+        form.addRow(tr("dlg.source"), self.source_combo)
 
-        mode_box = QGroupBox("Split Mode")
+        mode_box = QGroupBox(tr("grid.mode_box"))
         mode_layout = QGridLayout(mode_box)
 
-        self.grid_radio = QRadioButton("Rows x Columns")
+        self.grid_radio = QRadioButton(tr("grid.rows_cols"))
         self.grid_radio.setChecked(True)
         self.rows_spin = QSpinBox()
         self.rows_spin.setRange(1, 256)
@@ -682,7 +682,7 @@ class GridSplitterDialog(QDialog):
         self.cols_spin.setRange(1, 256)
         self.cols_spin.setValue(2)
 
-        self.tile_radio = QRadioButton("Fixed Tile Size (px)")
+        self.tile_radio = QRadioButton(tr("grid.fixed_tile"))
         self.tile_w_spin = QSpinBox()
         self.tile_w_spin.setRange(1, 8192)
         self.tile_w_spin.setValue(64)
@@ -691,15 +691,15 @@ class GridSplitterDialog(QDialog):
         self.tile_h_spin.setValue(64)
 
         mode_layout.addWidget(self.grid_radio, 0, 0, 1, 4)
-        mode_layout.addWidget(QLabel("Rows:"), 1, 0)
+        mode_layout.addWidget(QLabel(tr("grid.rows")), 1, 0)
         mode_layout.addWidget(self.rows_spin, 1, 1)
-        mode_layout.addWidget(QLabel("Cols:"), 1, 2)
+        mode_layout.addWidget(QLabel(tr("grid.cols")), 1, 2)
         mode_layout.addWidget(self.cols_spin, 1, 3)
 
         mode_layout.addWidget(self.tile_radio, 2, 0, 1, 4)
-        mode_layout.addWidget(QLabel("Tile W:"), 3, 0)
+        mode_layout.addWidget(QLabel(tr("grid.tile_w")), 3, 0)
         mode_layout.addWidget(self.tile_w_spin, 3, 1)
-        mode_layout.addWidget(QLabel("Tile H:"), 3, 2)
+        mode_layout.addWidget(QLabel(tr("grid.tile_h")), 3, 2)
         mode_layout.addWidget(self.tile_h_spin, 3, 3)
 
         root.addLayout(form)
@@ -707,17 +707,17 @@ class GridSplitterDialog(QDialog):
 
         prefix_form = QFormLayout()
         self.prefix_edit = QLineEdit("tile")
-        prefix_form.addRow("Filename Prefix:", self.prefix_edit)
+        prefix_form.addRow(tr("grid.prefix"), self.prefix_edit)
         root.addLayout(prefix_form)
 
-        self.count_label = QLabel("4 slices")
+        self.count_label = QLabel("")
         self.count_label.setStyleSheet("font-weight: 600;")
         root.addWidget(self.count_label)
 
         btn_row = QHBoxLayout()
-        self.export_btn = QPushButton("Export PNGs...")
-        self.open_tabs_btn = QPushButton("Open in Tabs")
-        self.close_btn = QPushButton("Close")
+        self.export_btn = QPushButton(tr("dlg.export_pngs"))
+        self.open_tabs_btn = QPushButton(tr("dlg.open_tabs"))
+        self.close_btn = QPushButton(tr("dlg.close"))
         btn_row.addWidget(self.export_btn)
         btn_row.addWidget(self.open_tabs_btn)
         btn_row.addWidget(self.close_btn)
@@ -739,7 +739,7 @@ class GridSplitterDialog(QDialog):
         self.close_btn.clicked.connect(self.reject)
 
     def _source_rgba(self) -> np.ndarray:
-        if self.source_combo.currentText() == "Active Layer" and self.doc.active_layer is not None:
+        if self.source_combo.currentData() == "layer" and self.doc.active_layer is not None:
             return np.ascontiguousarray(self.doc.active_layer.pixels, dtype=np.uint8)
         return np.ascontiguousarray(self.doc.composite(), dtype=np.uint8)
 
@@ -762,7 +762,7 @@ class GridSplitterDialog(QDialog):
             rows = min(self.rows_spin.value(), h)
             cols = min(self.cols_spin.value(), w)
             total = rows * cols
-        self.count_label.setText(f"{total} slice(s) from {w}x{h} px")
+        self.count_label.setText(tr("grid.summary", total=total, w=w, h=h))
 
     def compute_slices(self) -> list[tuple[tuple[int, int, int, int], np.ndarray]]:
         rgba = self._source_rgba()
@@ -793,11 +793,15 @@ class GridSplitterDialog(QDialog):
         return docs
 
     def _on_export_clicked(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Select Output Folder")
+        folder = QFileDialog.getExistingDirectory(self, tr("dlg.select_folder"))
         if not folder:
             return
         paths = self.export_to_folder(Path(folder))
-        QMessageBox.information(self, "Grid Export", f"Exported {len(paths)} slice(s) to:\n{folder}")
+        QMessageBox.information(
+            self,
+            tr("grid.title"),
+            tr("grid.exported_msg", count=len(paths), folder=folder),
+        )
 
     def _on_open_tabs_clicked(self) -> None:
         docs = self.open_in_tabs()
@@ -825,7 +829,7 @@ class SmartAlphaSplitterDialog(QDialog):
         self._on_preview_boxes = on_preview_boxes
         self.detected_boxes: list[ComponentBox] = []
 
-        self.setWindowTitle("Smart Alpha Splitter")
+        self.setWindowTitle(tr("alpha_split.title"))
         self.setMinimumWidth(420)
         self._build_ui()
         self.preview_on_canvas()
@@ -835,8 +839,9 @@ class SmartAlphaSplitterDialog(QDialog):
 
         form = QFormLayout()
         self.source_combo = QComboBox()
-        self.source_combo.addItems(["Active Layer", "Composited Canvas"])
-        form.addRow("Source:", self.source_combo)
+        self.source_combo.addItem(tr("dlg.source_layer"), "layer")
+        self.source_combo.addItem(tr("dlg.source_canvas"), "canvas")
+        form.addRow(tr("dlg.source"), self.source_combo)
 
         thr_row = QHBoxLayout()
         self.threshold_slider = QSlider(Qt.Orientation.Horizontal)
@@ -847,35 +852,35 @@ class SmartAlphaSplitterDialog(QDialog):
         self.threshold_spin.setValue(10)
         thr_row.addWidget(self.threshold_slider, 1)
         thr_row.addWidget(self.threshold_spin)
-        form.addRow("Alpha Threshold:", thr_row)
+        form.addRow(tr("alpha_split.threshold"), thr_row)
 
         self.min_area_spin = QSpinBox()
         self.min_area_spin.setRange(1, 10_000_000)
         self.min_area_spin.setValue(16)
-        form.addRow("Min Area (px):", self.min_area_spin)
+        form.addRow(tr("alpha_split.min_area"), self.min_area_spin)
 
         self.padding_spin = QSpinBox()
         self.padding_spin.setRange(0, 256)
         self.padding_spin.setValue(2)
-        form.addRow("Padding (px):", self.padding_spin)
+        form.addRow(tr("alpha_split.padding"), self.padding_spin)
 
         self.prefix_edit = QLineEdit("sprite")
-        form.addRow("Prefix:", self.prefix_edit)
+        form.addRow(tr("alpha_split.prefix"), self.prefix_edit)
         root.addLayout(form)
 
-        self.preview_checkbox = QCheckBox("Auto Preview Boxes on Canvas")
+        self.preview_checkbox = QCheckBox(tr("alpha_split.auto_preview"))
         self.preview_checkbox.setChecked(True)
         root.addWidget(self.preview_checkbox)
 
-        self.count_label = QLabel("Detected 0 sprite(s)")
+        self.count_label = QLabel(tr("alpha_split.detected", count=0))
         self.count_label.setStyleSheet("font-weight: 600;")
         root.addWidget(self.count_label)
 
         btn_row = QHBoxLayout()
-        self.preview_btn = QPushButton("Preview on Canvas")
-        self.export_btn = QPushButton("Export PNGs")
-        self.open_tabs_btn = QPushButton("Open in Tabs")
-        self.close_btn = QPushButton("Close")
+        self.preview_btn = QPushButton(tr("alpha_split.preview_btn"))
+        self.export_btn = QPushButton(tr("dlg.export_pngs"))
+        self.open_tabs_btn = QPushButton(tr("dlg.open_tabs"))
+        self.close_btn = QPushButton(tr("dlg.close"))
         btn_row.addWidget(self.preview_btn)
         btn_row.addWidget(self.export_btn)
         btn_row.addWidget(self.open_tabs_btn)
@@ -912,10 +917,10 @@ class SmartAlphaSplitterDialog(QDialog):
             self.preview_on_canvas()
         else:
             boxes = self.detect_boxes()
-            self.count_label.setText(f"Detected {len(boxes)} sprite(s)")
+            self.count_label.setText(tr("alpha_split.detected", count=len(boxes)))
 
     def _source_rgba(self) -> np.ndarray:
-        if self.source_combo.currentText() == "Active Layer" and self.doc.active_layer is not None:
+        if self.source_combo.currentData() == "layer" and self.doc.active_layer is not None:
             return np.ascontiguousarray(self.doc.active_layer.pixels, dtype=np.uint8)
         return np.ascontiguousarray(self.doc.composite(), dtype=np.uint8)
 
@@ -928,7 +933,7 @@ class SmartAlphaSplitterDialog(QDialog):
             padding=self.padding_spin.value(),
         )
         self.detected_boxes = boxes
-        self.count_label.setText(f"Detected {len(boxes)} sprite(s)")
+        self.count_label.setText(tr("alpha_split.detected", count=len(boxes)))
         return boxes
 
     def _emit_boxes(self, boxes: list[ComponentBox]) -> None:
@@ -961,11 +966,15 @@ class SmartAlphaSplitterDialog(QDialog):
         return docs
 
     def _on_export_clicked(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Select Output Folder")
+        folder = QFileDialog.getExistingDirectory(self, tr("dlg.select_folder"))
         if not folder:
             return
         paths = self.export_to_folder(Path(folder))
-        QMessageBox.information(self, "Smart Alpha Export", f"Exported {len(paths)} sprite(s) to:\n{folder}")
+        QMessageBox.information(
+            self,
+            tr("alpha_split.title"),
+            tr("alpha_split.exported_msg", count=len(paths), folder=folder),
+        )
 
     def _on_open_tabs_clicked(self) -> None:
         docs = self.open_in_tabs()
@@ -1016,7 +1025,7 @@ class BatchProcessorDialog(QDialog):
         self._worker: Optional[_BatchWorker] = None
         self._cancel_event: Optional[threading.Event] = None
 
-        self.setWindowTitle("Batch Image Processor")
+        self.setWindowTitle(tr("batch.title"))
         self.setMinimumWidth(520)
         self._build_ui()
 
@@ -1026,17 +1035,17 @@ class BatchProcessorDialog(QDialog):
 
         in_row = QHBoxLayout()
         self.input_dir_edit = QLineEdit()
-        self.input_browse_btn = QPushButton("Browse...")
+        self.input_browse_btn = QPushButton(tr("dlg.browse"))
         in_row.addWidget(self.input_dir_edit, 1)
         in_row.addWidget(self.input_browse_btn)
-        form.addRow("Input Folder:", in_row)
+        form.addRow(tr("batch.in_dir"), in_row)
 
         out_row = QHBoxLayout()
         self.output_dir_edit = QLineEdit()
-        self.output_browse_btn = QPushButton("Browse...")
+        self.output_browse_btn = QPushButton(tr("dlg.browse"))
         out_row.addWidget(self.output_dir_edit, 1)
         out_row.addWidget(self.output_browse_btn)
-        form.addRow("Output Folder:", out_row)
+        form.addRow(tr("batch.out_dir"), out_row)
 
         fmt_row = QHBoxLayout()
         self.format_combo = QComboBox()
@@ -1048,21 +1057,21 @@ class BatchProcessorDialog(QDialog):
         self.workers_spin.setRange(1, 16)
         self.workers_spin.setValue(4)
         fmt_row.addWidget(self.format_combo)
-        fmt_row.addWidget(QLabel("Quality:"))
+        fmt_row.addWidget(QLabel(tr("export.quality")))
         fmt_row.addWidget(self.quality_spin)
-        fmt_row.addWidget(QLabel("Threads:"))
+        fmt_row.addWidget(QLabel(tr("batch.threads")))
         fmt_row.addWidget(self.workers_spin)
-        form.addRow("Output Settings:", fmt_row)
+        form.addRow(tr("batch.out_settings"), fmt_row)
         root.addLayout(form)
 
-        ops_box = QGroupBox("Pipeline Operations")
+        ops_box = QGroupBox(tr("batch.ops_box"))
         ops_layout = QVBoxLayout(ops_box)
 
-        self.ai_remove_bg_check = QCheckBox("AI Remove Background (u2netp.onnx)")
+        self.ai_remove_bg_check = QCheckBox(tr("batch.op_ai_bg"))
         ops_layout.addWidget(self.ai_remove_bg_check)
 
         chroma_row = QHBoxLayout()
-        self.chroma_key_check = QCheckBox("Chroma Key")
+        self.chroma_key_check = QCheckBox(tr("batch.op_chroma"))
         self.chroma_r_spin = QSpinBox()
         self.chroma_g_spin = QSpinBox()
         self.chroma_b_spin = QSpinBox()
@@ -1077,15 +1086,15 @@ class BatchProcessorDialog(QDialog):
         chroma_row.addWidget(self.chroma_r_spin)
         chroma_row.addWidget(self.chroma_g_spin)
         chroma_row.addWidget(self.chroma_b_spin)
-        chroma_row.addWidget(QLabel("Tol:"))
+        chroma_row.addWidget(QLabel(tr("batch.op_tol")))
         chroma_row.addWidget(self.chroma_tol_spin)
         ops_layout.addLayout(chroma_row)
 
-        self.trim_check = QCheckBox("Trim Transparent Pixels")
+        self.trim_check = QCheckBox(tr("batch.op_trim"))
         ops_layout.addWidget(self.trim_check)
 
         resize_row = QHBoxLayout()
-        self.resize_check = QCheckBox("Resize")
+        self.resize_check = QCheckBox(tr("batch.op_resize"))
         self.resize_w_spin = QSpinBox()
         self.resize_w_spin.setRange(1, 16384)
         self.resize_w_spin.setValue(512)
@@ -1093,9 +1102,9 @@ class BatchProcessorDialog(QDialog):
         self.resize_h_spin.setRange(1, 16384)
         self.resize_h_spin.setValue(512)
         resize_row.addWidget(self.resize_check)
-        resize_row.addWidget(QLabel("W:"))
+        resize_row.addWidget(QLabel(tr("batch.w")))
         resize_row.addWidget(self.resize_w_spin)
-        resize_row.addWidget(QLabel("H:"))
+        resize_row.addWidget(QLabel(tr("batch.h")))
         resize_row.addWidget(self.resize_h_spin)
         resize_row.addStretch(1)
         ops_layout.addLayout(resize_row)
@@ -1105,13 +1114,13 @@ class BatchProcessorDialog(QDialog):
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
-        self.status_label = QLabel("Ready")
+        self.status_label = QLabel(tr("batch.ready"))
         root.addWidget(self.progress_bar)
         root.addWidget(self.status_label)
 
         btn_row = QHBoxLayout()
-        self.run_btn = QPushButton("Run Batch")
-        self.close_btn = QPushButton("Close")
+        self.run_btn = QPushButton(tr("batch.run"))
+        self.close_btn = QPushButton(tr("dlg.close"))
         btn_row.addStretch(1)
         btn_row.addWidget(self.run_btn)
         btn_row.addWidget(self.close_btn)
@@ -1123,12 +1132,12 @@ class BatchProcessorDialog(QDialog):
         self.close_btn.clicked.connect(self.reject)
 
     def _browse_input(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Select Input Folder")
+        folder = QFileDialog.getExistingDirectory(self, tr("batch.sel_in"))
         if folder:
             self.input_dir_edit.setText(folder)
 
     def _browse_output(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Select Output Folder")
+        folder = QFileDialog.getExistingDirectory(self, tr("batch.sel_out"))
         if folder:
             self.output_dir_edit.setText(folder)
 
@@ -1167,7 +1176,9 @@ class BatchProcessorDialog(QDialog):
 
         result = processor.run(progress_callback=on_progress)
         self.last_result = result
-        self.status_label.setText(f"Done: {result.succeeded}/{result.total} succeeded, {result.failed} failed")
+        self.status_label.setText(
+            tr("batch.done", ok=result.succeeded, total=result.total, fail=result.failed)
+        )
         self.batch_completed.emit(result)
         return result
 
@@ -1175,16 +1186,20 @@ class BatchProcessorDialog(QDialog):
         in_text = self.input_dir_edit.text().strip()
         out_text = self.output_dir_edit.text().strip()
         if not in_text or not out_text:
-            QMessageBox.warning(self, "Batch Processor", "Please specify both Input and Output folders.")
+            QMessageBox.warning(self, tr("batch.title"), tr("batch.warn_dirs"))
             return
         cfg = self.build_config()
         if not cfg.input_dir.is_dir():
-            QMessageBox.warning(self, "Batch Processor", f"Input folder does not exist:\n{cfg.input_dir}")
+            QMessageBox.warning(
+                self,
+                tr("batch.title"),
+                tr("batch.warn_missing_in", path=cfg.input_dir),
+            )
             return
 
         self.run_btn.setEnabled(False)
         self.progress_bar.setValue(0)
-        self.status_label.setText("Starting batch...")
+        self.status_label.setText(tr("batch.starting"))
 
         self._cancel_event = threading.Event()
         self._thread = QThread(self)
@@ -1209,13 +1224,15 @@ class BatchProcessorDialog(QDialog):
         self.last_result = result
         self.run_btn.setEnabled(True)
         self.progress_bar.setValue(100 if result.total > 0 else 0)
-        self.status_label.setText(f"Done: {result.succeeded}/{result.total} succeeded, {result.failed} failed")
+        self.status_label.setText(
+            tr("batch.done", ok=result.succeeded, total=result.total, fail=result.failed)
+        )
         self.batch_completed.emit(result)
 
     def _on_worker_failed(self, msg: str) -> None:
         self.run_btn.setEnabled(True)
-        self.status_label.setText(f"Error: {msg}")
-        QMessageBox.critical(self, "Batch Error", msg)
+        self.status_label.setText(f"{tr('batch.error')}: {msg}")
+        QMessageBox.critical(self, tr("batch.error"), msg)
 
     def _cleanup_worker(self) -> None:
         if self._worker is not None:
@@ -1269,7 +1286,7 @@ class HotkeyEditorDialog(QDialog):
         self.bindings = load_keybindings(self.keybindings_path)
         self._editors: dict[str, _HotkeySequenceEdit] = {}
 
-        self.setWindowTitle("Keyboard Shortcuts")
+        self.setWindowTitle(tr("hotkeys.title"))
         self.setMinimumSize(460, 520)
         self._build_ui()
 
@@ -1277,14 +1294,16 @@ class HotkeyEditorDialog(QDialog):
         root = QVBoxLayout(self)
 
         self.table = QTableWidget(len(self.bindings), 2)
-        self.table.setHorizontalHeaderLabels(["Action", "Shortcut"])
+        self.table.setHorizontalHeaderLabels([tr("hotkeys.col_action"), tr("hotkeys.col_shortcut")])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
 
         for row, (action, shortcut) in enumerate(self.bindings.items()):
-            label = ACTION_DISPLAY_NAMES.get(action, action)
+            label = tr(f"hk.{action}")
+            if label == f"hk.{action}":
+                label = ACTION_DISPLAY_NAMES.get(action, action)
             item = QTableWidgetItem(label)
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             item.setData(Qt.ItemDataRole.UserRole, action)
@@ -1297,7 +1316,7 @@ class HotkeyEditorDialog(QDialog):
         root.addWidget(self.table, 1)
 
         btn_row = QHBoxLayout()
-        self.reset_btn = QPushButton("Reset Defaults")
+        self.reset_btn = QPushButton(tr("hotkeys.reset"))
         btn_row.addWidget(self.reset_btn)
         btn_row.addStretch(1)
         buttons = QDialogButtonBox(
