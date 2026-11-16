@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QSpinBox,
     QTabBar,
@@ -42,9 +43,10 @@ from PySide6.QtWidgets import (
 
 from app.config.i18n import get_language, set_language as set_i18n_language, tr
 from app.core.ai_bg_remove import apply_ai_background_removal
-from app.core.document import DocumentSession, DocumentTabManager
+from app.core.document import CallableCommand, DocumentSession, DocumentTabManager
 from app.core.layer import Layer
 from app.tools import BaseTool, CropTool, ToolContext, ToolType, create_default_tools
+from app.tools.base_tool import align_selection_mask_to_layer
 from app.ui.canvas_view import CanvasView, extract_image_paths_from_mime
 from app.ui.dialogs import (
     BatchProcessorDialog,
@@ -299,6 +301,8 @@ class MainWindow(QMainWindow):
             self._register_editor_action("paste_clipboard", "action.paste", self.paste_from_clipboard)
         )
         edit_menu.addAction(self._register_misc_action("action.deselect", self.clear_selection, "Ctrl+D"))
+        edit_menu.addAction(self._register_misc_action("ctx.invert_sel", self.invert_selection, "Ctrl+Shift+I"))
+        edit_menu.addAction(self._register_misc_action("ctx.clear_sel_contents", self.delete_selection_contents, "Delete"))
         edit_menu.addSeparator()
         edit_menu.addAction(self._register_misc_action("action.hotkeys", self.open_hotkey_editor))
 
@@ -318,6 +322,8 @@ class MainWindow(QMainWindow):
         self._menus["menu.layer"] = layer_menu
         layer_menu.addAction(self._register_misc_action("action.add_layer", self.layers_panel.add_layer))
         layer_menu.addAction(self._register_misc_action("action.dup_layer", self.layers_panel.duplicate_layer))
+        layer_menu.addAction(self._register_misc_action("ctx.layer_via_copy", self.layer_via_copy, "Ctrl+J"))
+        layer_menu.addAction(self._register_misc_action("ctx.layer_via_cut", self.layer_via_cut, "Ctrl+Shift+J"))
         layer_menu.addAction(self._register_misc_action("action.del_layer", self.layers_panel.delete_layer))
         layer_menu.addAction(self._register_misc_action("action.merge_down", self.layers_panel.merge_down))
         layer_menu.addSeparator()
@@ -414,6 +420,7 @@ class MainWindow(QMainWindow):
         self.canvas_view.zoomChanged.connect(self._on_zoom_changed)
         self.canvas_view.documentModified.connect(self._on_canvas_document_modified)
         self.canvas_view.filesDropped.connect(self.insert_image_files_as_layers)
+        self.canvas_view.contextMenuRequested.connect(self.show_canvas_context_menu)
 
         self.layers_panel.layersChanged.connect(self._on_layers_changed)
         self.layers_panel.activeLayerChanged.connect(self._on_active_layer_changed)
@@ -711,6 +718,254 @@ class MainWindow(QMainWindow):
         self.canvas_view._invalidate_selection_cache()
         self.canvas_view._sync_march_timer()
         self.canvas_view.update()
+
+    def invert_selection(self) -> None:
+        doc = self.active_document
+        if doc is None:
+            return
+        if doc.selection_mask is None:
+            inverted = np.full((doc.height, doc.width), 255, dtype=np.uint8)
+        else:
+            inverted = np.ascontiguousarray(255 - doc.selection_mask, dtype=np.uint8)
+        doc.set_selection_mask(inverted if np.any(inverted) else None)
+        self._refresh_canvas_and_tabs()
+
+    def _extract_selected_region_for_layer(
+        self,
+        doc: DocumentSession,
+        layer: Layer,
+    ) -> Optional[tuple[int, int, int, int, np.ndarray, np.ndarray]]:
+        """Return (ix0, iy0, ix1, iy1, sel_sub_bool, patch_rgba) intersecting layer and selection."""
+        if doc.selection_mask is None:
+            return None
+        ys, xs = np.nonzero(doc.selection_mask)
+        if ys.size == 0:
+            return None
+        sx0, sx1 = int(xs.min()), int(xs.max()) + 1
+        sy0, sy1 = int(ys.min()), int(ys.max()) + 1
+
+        ix0 = max(sx0, layer.offset_x)
+        iy0 = max(sy0, layer.offset_y)
+        ix1 = min(sx1, layer.offset_x + layer.width)
+        iy1 = min(sy1, layer.offset_y + layer.height)
+        if ix1 <= ix0 or iy1 <= iy0:
+            return None
+
+        sel_sub = doc.selection_mask[iy0:iy1, ix0:ix1] > 0
+        if not np.any(sel_sub):
+            return None
+
+        lx0 = ix0 - layer.offset_x
+        ly0 = iy0 - layer.offset_y
+        lx1 = ix1 - layer.offset_x
+        ly1 = iy1 - layer.offset_y
+        patch = np.ascontiguousarray(layer.pixels[ly0:ly1, lx0:lx1].copy(), dtype=np.uint8)
+        patch[~sel_sub] = 0
+        return (ix0, iy0, ix1, iy1, sel_sub, patch)
+
+    def layer_via_copy(self) -> Optional[Layer]:
+        doc = self.active_document
+        if doc is None or doc.active_layer is None:
+            return None
+        layer = doc.active_layer
+        if doc.selection_mask is None:
+            copied = doc.duplicate_layer(doc.active_layer_index)
+            self.layers_panel.refresh()
+            self._refresh_canvas_and_tabs()
+            return copied
+
+        extracted = self._extract_selected_region_for_layer(doc, layer)
+        if extracted is None:
+            return None
+        ix0, iy0, _ix1, _iy1, _sel_sub, patch = extracted
+        new_layer = Layer.from_rgba(
+            patch,
+            name=f"{layer.name} (Copy)",
+            copy=False,
+            offset_x=ix0,
+            offset_y=iy0,
+        )
+        doc.add_layer(layer=new_layer, index=doc.active_layer_index + 1)
+        doc.clear_selection()
+        self.layers_panel.refresh()
+        self._refresh_canvas_and_tabs()
+        return new_layer
+
+    def layer_via_cut(self) -> Optional[Layer]:
+        doc = self.active_document
+        if doc is None or doc.active_layer is None or doc.active_layer.locked:
+            return None
+        layer = doc.active_layer
+        if doc.selection_mask is None:
+            return self.layer_via_copy()
+
+        extracted = self._extract_selected_region_for_layer(doc, layer)
+        if extracted is None:
+            return None
+        ix0, iy0, ix1, iy1, sel_sub, patch = extracted
+        lx0 = ix0 - layer.offset_x
+        ly0 = iy0 - layer.offset_y
+        lw = ix1 - ix0
+        lh = iy1 - iy0
+
+        before_patch = layer.get_patch((lx0, ly0, lw, lh))
+        cleared_patch = before_patch.copy()
+        cleared_patch[sel_sub] = 0
+
+        insert_idx = doc.active_layer_index + 1
+        prev_active = doc.active_layer_index
+        prev_sel = doc.selection_mask
+        new_layer = Layer.from_rgba(
+            patch,
+            name=f"{layer.name} (Cut)",
+            copy=False,
+            offset_x=ix0,
+            offset_y=iy0,
+        )
+
+        def do(d: DocumentSession) -> None:
+            layer.set_patch((lx0, ly0, lw, lh), cleared_patch)
+            d.layers.insert(insert_idx, new_layer)
+            d.active_layer_index = insert_idx
+            d.selection_mask = None
+
+        def undo(d: DocumentSession) -> None:
+            d.layers.pop(insert_idx)
+            layer.set_patch((lx0, ly0, lw, lh), before_patch)
+            d.active_layer_index = prev_active
+            d.selection_mask = prev_sel
+
+        do(doc)
+        doc.undo_stack.push(
+            CallableCommand(
+                undo_fn=undo,
+                redo_fn=do,
+                description="Layer via Cut",
+                estimated_bytes=int(before_patch.nbytes + patch.nbytes),
+            )
+        )
+        doc.modified = True
+        doc.invalidate_composite()
+        self.layers_panel.refresh()
+        self._refresh_canvas_and_tabs()
+        return new_layer
+
+    def fill_selection_with_fg(self) -> bool:
+        doc = self.active_document
+        if doc is None or doc.active_layer is None or doc.active_layer.locked:
+            return False
+        layer = doc.active_layer
+        r, g, b, a = self.tool_context.fg_color
+        fill_rgba = np.array([r, g, b, a], dtype=np.uint8)
+
+        if doc.selection_mask is None:
+            with doc.edit_layer_context(layer=layer, description="Fill Layer"):
+                layer.pixels[:, :] = fill_rgba
+        else:
+            aligned = align_selection_mask_to_layer(doc, layer)
+            if aligned is None or not np.any(aligned > 0):
+                return False
+            with doc.edit_layer_context(layer=layer, description="Fill Selection"):
+                layer.pixels[aligned > 0] = fill_rgba
+
+        self.layers_panel.refresh()
+        self._refresh_canvas_and_tabs()
+        return True
+
+    def delete_selection_contents(self) -> bool:
+        doc = self.active_document
+        if doc is None or doc.active_layer is None or doc.active_layer.locked:
+            return False
+        layer = doc.active_layer
+        if doc.selection_mask is None:
+            with doc.edit_layer_context(layer=layer, description="Clear Layer"):
+                layer.pixels[:, :] = 0
+        else:
+            aligned = align_selection_mask_to_layer(doc, layer)
+            if aligned is None or not np.any(aligned > 0):
+                return False
+            with doc.edit_layer_context(layer=layer, description="Clear Selection"):
+                layer.pixels[aligned > 0] = 0
+
+        self.layers_panel.refresh()
+        self._refresh_canvas_and_tabs()
+        return True
+
+    def crop_to_selection(self) -> bool:
+        doc = self.active_document
+        if doc is None or doc.selection_mask is None:
+            return False
+        ys, xs = np.nonzero(doc.selection_mask)
+        if ys.size == 0:
+            return False
+        x0, x1 = int(xs.min()), int(xs.max()) + 1
+        y0, y1 = int(ys.min()), int(ys.max()) + 1
+        cw, ch = x1 - x0, y1 - y0
+        if cw <= 0 or ch <= 0:
+            return False
+
+        old_w, old_h = doc.width, doc.height
+        layer_offsets = [(l, l.offset_x, l.offset_y) for l in doc.layers]
+        old_sel = doc.selection_mask
+
+        def do(d: DocumentSession) -> None:
+            d.width = cw
+            d.height = ch
+            for l, ox, oy in layer_offsets:
+                l.offset_x = ox - x0
+                l.offset_y = oy - y0
+            d.selection_mask = None
+            d._composited_cache = None
+            d._clip_alpha_scratch = None
+
+        def undo(d: DocumentSession) -> None:
+            d.width = old_w
+            d.height = old_h
+            for l, ox, oy in layer_offsets:
+                l.offset_x = ox
+                l.offset_y = oy
+            d.selection_mask = old_sel
+            d._composited_cache = None
+            d._clip_alpha_scratch = None
+
+        do(doc)
+        doc.undo_stack.push(
+            CallableCommand(undo_fn=undo, redo_fn=do, description=f"Crop to Selection ({cw}x{ch})")
+        )
+        doc.modified = True
+        doc.invalidate_composite()
+        self._on_document_resized()
+        return True
+
+    def build_canvas_context_menu(self) -> QMenu:
+        """Build a Photoshop-style context menu tailored to active selection state."""
+        menu = QMenu(self)
+        doc = self.active_document
+        if doc is None:
+            menu.addAction(tr("ctx.paste"), self.paste_from_clipboard)
+            return menu
+
+        if doc.selection_mask is not None:
+            menu.addAction(tr("ctx.deselect"), self.clear_selection)
+            menu.addAction(tr("ctx.invert_sel"), self.invert_selection)
+            menu.addSeparator()
+            menu.addAction(tr("ctx.layer_via_copy"), self.layer_via_copy)
+            menu.addAction(tr("ctx.layer_via_cut"), self.layer_via_cut)
+            menu.addAction(tr("ctx.free_transform"), lambda: self.select_tool(ToolType.TRANSFORM.value))
+            menu.addSeparator()
+            menu.addAction(tr("ctx.fill_fg"), self.fill_selection_with_fg)
+            menu.addAction(tr("ctx.clear_sel_contents"), self.delete_selection_contents)
+            menu.addAction(tr("ctx.crop_to_sel"), self.crop_to_selection)
+        else:
+            menu.addAction(tr("ctx.free_transform"), lambda: self.select_tool(ToolType.TRANSFORM.value))
+            menu.addAction(tr("ctx.dup_layer"), self.layers_panel.duplicate_layer)
+            menu.addAction(tr("ctx.center_canvas"), lambda: self.center_active_layer(True, True))
+            menu.addAction(tr("ctx.paste"), self.paste_from_clipboard)
+        return menu
+
+    def show_canvas_context_menu(self, global_pos) -> None:
+        menu = self.build_canvas_context_menu()
+        menu.exec(global_pos)
 
     def copy_selection(self) -> bool:
         doc = self.active_document

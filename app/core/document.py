@@ -265,6 +265,7 @@ class DocumentSession:
         self._clip_alpha_scratch: Optional[np.ndarray] = None
         self._composite_dirty: bool = True
         self._pending_edit: Optional[tuple[str, str, tuple[int, int, int, int], np.ndarray]] = None
+        self.suppressed_layer_id: Optional[str] = None
 
     @property
     def display_title(self) -> str:
@@ -296,6 +297,12 @@ class DocumentSession:
 
     def invalidate_composite(self) -> None:
         self._composite_dirty = True
+
+    def set_suppressed_layer(self, layer_id: Optional[str]) -> None:
+        """Temporarily suppress rendering of a layer (e.g., during Free Transform preview)."""
+        if self.suppressed_layer_id != layer_id:
+            self.suppressed_layer_id = layer_id
+            self.invalidate_composite()
 
     def set_tab_active(self, active: bool) -> None:
         """Release cached composited buffers when tab becomes inactive (zero display overhead)."""
@@ -392,7 +399,7 @@ class DocumentSession:
             if not layer.clipping_mask or idx == 0:
                 current_base_index = idx
                 current_clip_alpha = None
-                if not layer.visible or layer.opacity <= 0.0:
+                if layer.id == self.suppressed_layer_id or not layer.visible or layer.opacity <= 0.0:
                     continue
                 mask_buf = layer.mask.buffer if (layer.mask is not None and layer.mask.enabled) else None
                 engine.composite_layer(
@@ -407,7 +414,7 @@ class DocumentSession:
                     roi=roi,
                 )
             else:
-                if not layer.visible or layer.opacity <= 0.0:
+                if layer.id == self.suppressed_layer_id or not layer.visible or layer.opacity <= 0.0:
                     continue
                 if current_clip_alpha is None and current_base_index >= 0:
                     current_clip_alpha = self._compute_clip_alpha(self.layers[current_base_index])

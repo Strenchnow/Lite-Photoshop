@@ -11,8 +11,8 @@ from typing import Callable, Optional
 
 import numpy as np
 from PIL import Image
-from PySide6.QtCore import QEvent, QObject, Qt, QThread, Signal
-from PySide6.QtGui import QColor, QImage, QKeySequence, QPixmap
+from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt, QThread, Signal
+from PySide6.QtGui import QColor, QFont, QImage, QKeySequence, QMouseEvent, QPainter, QPaintEvent, QPen, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QColorDialog,
@@ -48,6 +48,7 @@ from app.core.document import DocumentSession, DocumentTabManager, compute_dirty
 from app.core.splitter import (
     detect_alpha_sprites,
     export_slices_to_folder,
+    export_slices_to_zip,
     extract_alpha_sprites,
     open_slices_as_tabs,
     split_grid,
@@ -640,6 +641,141 @@ class ChromaKeyDialog(QDialog):
         super().closeEvent(event)
 
 
+class _SplitterPreviewWidget(QWidget):
+    """Interactive preview widget showing splitter boxes; click any box to exclude/include."""
+
+    selectionChanged = Signal(int, int)
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setMinimumSize(360, 190)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._pixmap: Optional[QPixmap] = None
+        self._src_w: int = 1
+        self._src_h: int = 1
+        self._boxes: list[tuple[int, int, int, int]] = []
+        self.excluded_indices: set[int] = set()
+        self._img_rect: QRectF = QRectF()
+        self._scale: float = 1.0
+
+    def set_data(
+        self,
+        rgba: np.ndarray,
+        boxes: list[tuple[int, int, int, int]],
+        reset_excluded: bool = True,
+    ) -> None:
+        self._src_h, self._src_w = max(1, int(rgba.shape[0])), max(1, int(rgba.shape[1]))
+        self._pixmap = _rgba_to_qpixmap(rgba, max_w=640, max_h=400)
+        self._boxes = list(boxes)
+        if reset_excluded:
+            self.excluded_indices.clear()
+        else:
+            self.excluded_indices = {i for i in self.excluded_indices if 0 <= i < len(self._boxes)}
+        self.update()
+        self.selectionChanged.emit(self.included_count, len(self._boxes))
+
+    @property
+    def included_count(self) -> int:
+        return max(0, len(self._boxes) - len(self.excluded_indices))
+
+    def toggle_index(self, idx: int) -> bool:
+        if not (0 <= idx < len(self._boxes)):
+            return False
+        if idx in self.excluded_indices:
+            self.excluded_indices.remove(idx)
+            included = True
+        else:
+            self.excluded_indices.add(idx)
+            included = False
+        self.update()
+        self.selectionChanged.emit(self.included_count, len(self._boxes))
+        return included
+
+    def _compute_layout(self) -> tuple[QRectF, float]:
+        avail_w = max(1.0, float(self.width() - 12))
+        avail_h = max(1.0, float(self.height() - 12))
+        scale = min(avail_w / float(self._src_w), avail_h / float(self._src_h))
+        dw = float(self._src_w) * scale
+        dh = float(self._src_h) * scale
+        rect = QRectF((self.width() - dw) * 0.5, (self.height() - dh) * 0.5, dw, dh)
+        return rect, scale
+
+    def box_screen_rect(self, idx: int) -> Optional[QRectF]:
+        if not (0 <= idx < len(self._boxes)):
+            return None
+        img_rect, scale = self._compute_layout()
+        bx, by, bw, bh = self._boxes[idx]
+        return QRectF(
+            img_rect.left() + bx * scale,
+            img_rect.top() + by * scale,
+            bw * scale,
+            bh * scale,
+        )
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(30, 30, 34))
+        painter.setPen(QColor(60, 60, 68))
+        painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
+
+        if self._pixmap is None or self._pixmap.isNull():
+            painter.end()
+            return
+
+        img_rect, scale = self._compute_layout()
+        self._img_rect = img_rect
+        self._scale = scale
+        painter.drawPixmap(img_rect.toRect(), self._pixmap)
+
+        badge_font = QFont("Segoe UI", 8, QFont.Weight.Bold)
+        painter.setFont(badge_font)
+
+        for idx, (bx, by, bw, bh) in enumerate(self._boxes):
+            r = QRectF(
+                img_rect.left() + bx * scale,
+                img_rect.top() + by * scale,
+                bw * scale,
+                bh * scale,
+            )
+            if idx in self.excluded_indices:
+                painter.fillRect(r, QColor(175, 38, 38, 125))
+                painter.setPen(QPen(QColor(239, 68, 68, 235), 1.5))
+                painter.drawRect(r)
+                painter.drawLine(r.topLeft(), r.bottomRight())
+                painter.drawLine(r.topRight(), r.bottomLeft())
+            else:
+                painter.setPen(QPen(QColor(34, 197, 94, 235), 1.5))
+                painter.drawRect(r)
+                if r.width() >= 18 and r.height() >= 16:
+                    tag = f"#{idx + 1}"
+                    tag_rect = QRectF(r.left() + 2, r.top() + 2, min(26.0, r.width() - 4), 14.0)
+                    painter.fillRect(tag_rect, QColor(16, 120, 60, 210))
+                    painter.setPen(QColor(255, 255, 255))
+                    painter.drawText(tag_rect, Qt.AlignmentFlag.AlignCenter, tag)
+        painter.end()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self._boxes:
+            img_rect, scale = self._compute_layout()
+            pos = event.position()
+            if img_rect.contains(pos):
+                ix = (pos.x() - img_rect.left()) / max(scale, 1e-6)
+                iy = (pos.y() - img_rect.top()) / max(scale, 1e-6)
+                best_idx: Optional[int] = None
+                best_area = float("inf")
+                for idx, (bx, by, bw, bh) in enumerate(self._boxes):
+                    if bx <= ix <= bx + bw and by <= iy <= by + bh:
+                        area = bw * bh
+                        if area < best_area:
+                            best_area = area
+                            best_idx = idx
+                if best_idx is not None:
+                    self.toggle_index(best_idx)
+                    event.accept()
+                    return
+        super().mousePressEvent(event)
+
+
 class GridSplitterDialog(QDialog):
     """Dialog to slice canvas or active layer into a Rows x Cols grid or fixed pixel tiles."""
 
@@ -655,11 +791,19 @@ class GridSplitterDialog(QDialog):
         super().__init__(parent)
         self.doc = doc
         self.tab_manager = tab_manager
+        self._all_slices: list[tuple[tuple[int, int, int, int], np.ndarray]] = []
 
         self.setWindowTitle(tr("grid.title"))
-        self.setMinimumWidth(400)
+        self.setMinimumWidth(460)
         self._build_ui()
         self._update_summary()
+
+    @property
+    def excluded_indices(self) -> set[int]:
+        return self.preview_widget.excluded_indices
+
+    def toggle_slice_excluded(self, index: int) -> bool:
+        return self.preview_widget.toggle_index(index)
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -710,15 +854,24 @@ class GridSplitterDialog(QDialog):
         prefix_form.addRow(tr("grid.prefix"), self.prefix_edit)
         root.addLayout(prefix_form)
 
+        self.preview_widget = _SplitterPreviewWidget()
+        root.addWidget(self.preview_widget)
+
         self.count_label = QLabel("")
         self.count_label.setStyleSheet("font-weight: 600;")
         root.addWidget(self.count_label)
 
+        self.selection_count_label = QLabel("")
+        self.selection_count_label.setStyleSheet("color: #b0b0b8;")
+        root.addWidget(self.selection_count_label)
+
         btn_row = QHBoxLayout()
         self.export_btn = QPushButton(tr("dlg.export_pngs"))
+        self.export_zip_btn = QPushButton(tr("dlg.export_zip"))
         self.open_tabs_btn = QPushButton(tr("dlg.open_tabs"))
         self.close_btn = QPushButton(tr("dlg.close"))
         btn_row.addWidget(self.export_btn)
+        btn_row.addWidget(self.export_zip_btn)
         btn_row.addWidget(self.open_tabs_btn)
         btn_row.addWidget(self.close_btn)
         root.addLayout(btn_row)
@@ -734,9 +887,16 @@ class GridSplitterDialog(QDialog):
         ):
             sig.connect(self._update_summary)
 
+        self.preview_widget.selectionChanged.connect(self._on_selection_changed)
         self.export_btn.clicked.connect(self._on_export_clicked)
+        self.export_zip_btn.clicked.connect(self._on_export_zip_clicked)
         self.open_tabs_btn.clicked.connect(self._on_open_tabs_clicked)
         self.close_btn.clicked.connect(self.reject)
+
+    def _on_selection_changed(self, selected: int, total: int) -> None:
+        self.selection_count_label.setText(
+            tr("splitter.selected_count", selected=selected, total=total)
+        )
 
     def _source_rgba(self) -> np.ndarray:
         if self.source_combo.currentData() == "layer" and self.doc.active_layer is not None:
@@ -753,30 +913,27 @@ class GridSplitterDialog(QDialog):
         buf = self._source_rgba()
         h, w = int(buf.shape[0]), int(buf.shape[1])
         if use_tiles:
-            tw = self.tile_w_spin.value()
-            th = self.tile_h_spin.value()
-            cols = (w + tw - 1) // tw
-            rows = (h + th - 1) // th
-            total = cols * rows
-        else:
-            rows = min(self.rows_spin.value(), h)
-            cols = min(self.cols_spin.value(), w)
-            total = rows * cols
-        self.count_label.setText(tr("grid.summary", total=total, w=w, h=h))
-
-    def compute_slices(self) -> list[tuple[tuple[int, int, int, int], np.ndarray]]:
-        rgba = self._source_rgba()
-        if self.tile_radio.isChecked():
-            return split_grid(
-                rgba,
+            self._all_slices = split_grid(
+                buf,
                 tile_w=self.tile_w_spin.value(),
                 tile_h=self.tile_h_spin.value(),
             )
-        return split_grid(
-            rgba,
-            rows=self.rows_spin.value(),
-            cols=self.cols_spin.value(),
-        )
+        else:
+            self._all_slices = split_grid(
+                buf,
+                rows=self.rows_spin.value(),
+                cols=self.cols_spin.value(),
+            )
+        total = len(self._all_slices)
+        self.count_label.setText(tr("grid.summary", total=total, w=w, h=h))
+        boxes = [rect for rect, _arr in self._all_slices]
+        self.preview_widget.set_data(buf, boxes, reset_excluded=True)
+
+    def compute_slices(self) -> list[tuple[tuple[int, int, int, int], np.ndarray]]:
+        if not self._all_slices:
+            self._update_summary()
+        excluded = self.preview_widget.excluded_indices
+        return [s for idx, s in enumerate(self._all_slices) if idx not in excluded]
 
     def export_to_folder(self, output_dir: Path) -> list[Path]:
         slices = self.compute_slices()
@@ -784,6 +941,25 @@ class GridSplitterDialog(QDialog):
         paths = export_slices_to_folder(slices, output_dir=Path(output_dir), prefix=prefix)
         self.exported.emit(paths)
         return paths
+
+    def export_to_zip(self, zip_path: Optional[Path] = None) -> Optional[Path]:
+        slices = self.compute_slices()
+        prefix = self.prefix_edit.text().strip() or "tile"
+        if zip_path is None:
+            chosen, _ = QFileDialog.getSaveFileName(
+                self,
+                tr("splitter.zip_save_title"),
+                f"{prefix}_slices.zip",
+                "ZIP Archive (*.zip);;All Files (*)",
+            )
+            if not chosen:
+                return None
+            target = Path(chosen)
+        else:
+            target = Path(zip_path)
+        out = export_slices_to_zip(slices, zip_path=target, prefix=prefix)
+        self.exported.emit([out])
+        return out
 
     def open_in_tabs(self) -> list[DocumentSession]:
         slices = self.compute_slices()
@@ -803,6 +979,15 @@ class GridSplitterDialog(QDialog):
             tr("grid.exported_msg", count=len(paths), folder=folder),
         )
 
+    def _on_export_zip_clicked(self) -> None:
+        out = self.export_to_zip()
+        if out is not None:
+            QMessageBox.information(
+                self,
+                tr("grid.title"),
+                tr("splitter.zip_exported_msg", count=len(self.compute_slices()), path=out),
+            )
+
     def _on_open_tabs_clicked(self) -> None:
         docs = self.open_in_tabs()
         if docs:
@@ -810,7 +995,7 @@ class GridSplitterDialog(QDialog):
 
 
 class SmartAlphaSplitterDialog(QDialog):
-    """C-accelerated Connected-Component Sprite Splitter dialog with canvas box preview."""
+    """C-accelerated Connected-Component Sprite Splitter dialog with interactive preview & ZIP export."""
 
     preview_boxes_changed = Signal(list)
     tabs_opened = Signal(list)
@@ -830,9 +1015,16 @@ class SmartAlphaSplitterDialog(QDialog):
         self.detected_boxes: list[ComponentBox] = []
 
         self.setWindowTitle(tr("alpha_split.title"))
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(480)
         self._build_ui()
         self.preview_on_canvas()
+
+    @property
+    def excluded_indices(self) -> set[int]:
+        return self.preview_widget.excluded_indices
+
+    def toggle_sprite_excluded(self, index: int) -> bool:
+        return self.preview_widget.toggle_index(index)
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -872,17 +1064,26 @@ class SmartAlphaSplitterDialog(QDialog):
         self.preview_checkbox.setChecked(True)
         root.addWidget(self.preview_checkbox)
 
+        self.preview_widget = _SplitterPreviewWidget()
+        root.addWidget(self.preview_widget)
+
         self.count_label = QLabel(tr("alpha_split.detected", count=0))
         self.count_label.setStyleSheet("font-weight: 600;")
         root.addWidget(self.count_label)
 
+        self.selection_count_label = QLabel("")
+        self.selection_count_label.setStyleSheet("color: #b0b0b8;")
+        root.addWidget(self.selection_count_label)
+
         btn_row = QHBoxLayout()
         self.preview_btn = QPushButton(tr("alpha_split.preview_btn"))
         self.export_btn = QPushButton(tr("dlg.export_pngs"))
+        self.export_zip_btn = QPushButton(tr("dlg.export_zip"))
         self.open_tabs_btn = QPushButton(tr("dlg.open_tabs"))
         self.close_btn = QPushButton(tr("dlg.close"))
         btn_row.addWidget(self.preview_btn)
         btn_row.addWidget(self.export_btn)
+        btn_row.addWidget(self.export_zip_btn)
         btn_row.addWidget(self.open_tabs_btn)
         btn_row.addWidget(self.close_btn)
         root.addLayout(btn_row)
@@ -893,10 +1094,17 @@ class SmartAlphaSplitterDialog(QDialog):
         self.padding_spin.valueChanged.connect(self._on_param_changed)
         self.source_combo.currentIndexChanged.connect(self._on_param_changed)
 
+        self.preview_widget.selectionChanged.connect(self._on_selection_changed)
         self.preview_btn.clicked.connect(self.preview_on_canvas)
         self.export_btn.clicked.connect(self._on_export_clicked)
+        self.export_zip_btn.clicked.connect(self._on_export_zip_clicked)
         self.open_tabs_btn.clicked.connect(self._on_open_tabs_clicked)
         self.close_btn.clicked.connect(self.reject)
+
+    def _on_selection_changed(self, selected: int, total: int) -> None:
+        self.selection_count_label.setText(
+            tr("splitter.selected_count", selected=selected, total=total)
+        )
 
     def _sync_threshold_from_slider(self, value: int) -> None:
         if self.threshold_spin.value() != value:
@@ -934,6 +1142,11 @@ class SmartAlphaSplitterDialog(QDialog):
         )
         self.detected_boxes = boxes
         self.count_label.setText(tr("alpha_split.detected", count=len(boxes)))
+        self.preview_widget.set_data(
+            rgba,
+            [(b.x, b.y, b.width, b.height) for b in boxes],
+            reset_excluded=True,
+        )
         return boxes
 
     def _emit_boxes(self, boxes: list[ComponentBox]) -> None:
@@ -948,8 +1161,10 @@ class SmartAlphaSplitterDialog(QDialog):
 
     def extract_slices(self) -> list[tuple[ComponentBox, np.ndarray]]:
         rgba = self._source_rgba()
-        boxes = self.detect_boxes()
-        return extract_alpha_sprites(rgba, boxes)
+        boxes = self.detected_boxes if self.detected_boxes else self.detect_boxes()
+        excluded = self.preview_widget.excluded_indices
+        included = [b for idx, b in enumerate(boxes) if idx not in excluded]
+        return extract_alpha_sprites(rgba, included)
 
     def export_to_folder(self, output_dir: Path) -> list[Path]:
         slices = self.extract_slices()
@@ -957,6 +1172,25 @@ class SmartAlphaSplitterDialog(QDialog):
         paths = export_slices_to_folder(slices, output_dir=Path(output_dir), prefix=prefix)
         self.exported.emit(paths)
         return paths
+
+    def export_to_zip(self, zip_path: Optional[Path] = None) -> Optional[Path]:
+        slices = self.extract_slices()
+        prefix = self.prefix_edit.text().strip() or "sprite"
+        if zip_path is None:
+            chosen, _ = QFileDialog.getSaveFileName(
+                self,
+                tr("splitter.zip_save_title"),
+                f"{prefix}_sprites.zip",
+                "ZIP Archive (*.zip);;All Files (*)",
+            )
+            if not chosen:
+                return None
+            target = Path(chosen)
+        else:
+            target = Path(zip_path)
+        out = export_slices_to_zip(slices, zip_path=target, prefix=prefix)
+        self.exported.emit([out])
+        return out
 
     def open_in_tabs(self) -> list[DocumentSession]:
         slices = self.extract_slices()
@@ -975,6 +1209,15 @@ class SmartAlphaSplitterDialog(QDialog):
             tr("alpha_split.title"),
             tr("alpha_split.exported_msg", count=len(paths), folder=folder),
         )
+
+    def _on_export_zip_clicked(self) -> None:
+        out = self.export_to_zip()
+        if out is not None:
+            QMessageBox.information(
+                self,
+                tr("alpha_split.title"),
+                tr("splitter.zip_exported_msg", count=len(self.extract_slices()), path=out),
+            )
 
     def _on_open_tabs_clicked(self) -> None:
         docs = self.open_in_tabs()

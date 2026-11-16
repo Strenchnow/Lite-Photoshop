@@ -342,14 +342,27 @@ def test_all_15_tools() -> None:
     crop_doc.undo()
     assert (crop_doc.width, crop_doc.height) == (100, 100)
 
-    # 11. FreeTransformTool (aspect-lock Shift drag + rotation + Enter commit + undo)
+    # 11. FreeTransformTool (non-ghosting suppressed layer, magnetic snapping, aspect-lock Shift, rotation, Enter/Esc)
     ft = tools[ToolType.TRANSFORM.value]
     assert isinstance(ft, FreeTransformTool)
     ft_doc = DocumentSession(120, 120, title="TransformDoc")
     ft_doc.active_layer.pixels[20:40, 20:40] = [0, 128, 255, 255]
     ft.on_activate(ft_doc)
     assert ft.active is True
+    assert ft_doc.suppressed_layer_id == ft_doc.active_layer.id
+    assert ft_doc.composite()[25, 25, 3] == 0, "Original layer must be suppressed during active transform"
     assert (ft.orig_w, ft.orig_h) == (20.0, 20.0)
+
+    # Magnetic snapping when moving transform box near left/top edge (center 13 -> left=3 -> snaps to 0, center=10)
+    ft.mouse_press(ft_doc, 30.0, 30.0, button=1)
+    ft.mouse_move(ft_doc, 13.0, 13.0, buttons=1, modifiers=MOD_NONE)
+    assert abs(ft.center_x - 10.0) < 1e-4 and abs(ft.center_y - 10.0) < 1e-4
+    assert ("vertical", 0.0) in ctx.snap_guides and ("horizontal", 0.0) in ctx.snap_guides
+    ft.mouse_move(ft_doc, 13.0, 13.0, buttons=1, modifiers=MOD_SHIFT)
+    assert ctx.snap_guides == []
+    ft.mouse_release(ft_doc, 30.0, 30.0, button=1)
+    ft.center_x, ft.center_y = 30.0, 30.0
+
     # Drag SE corner handle (40, 40) to (70, 55) with MOD_SHIFT -> aspect ratio stays 1:1
     ft.mouse_press(ft_doc, 40.0, 40.0, button=1)
     ft.mouse_move(ft_doc, 70.0, 55.0, buttons=1, modifiers=MOD_SHIFT)
@@ -357,6 +370,8 @@ def test_all_15_tools() -> None:
     assert abs(ft.box_w - ft.box_h) < 1e-4 and ft.box_w > 30.0
     assert ft.key_press(ft_doc, Qt.Key_Escape) is True
     assert ft.active is False
+    assert ft_doc.suppressed_layer_id is None
+    assert ft_doc.composite()[25, 25, 3] == 255, "Cancelled transform must restore original layer rendering"
 
     ft.begin_transform(ft_doc)
     ft.set_transform(scale_x=2.0, scale_y=2.0, angle_deg=15.0)
@@ -657,6 +672,16 @@ def test_main_window_canvas_panels_and_dialogs() -> None:
         grid_dlg = GridSplitterDialog(grid_doc, win.tab_manager, parent=win)
         grid_dlg.rows_spin.setValue(2)
         grid_dlg.cols_spin.setValue(2)
+        # Interactive exclusion & ZIP archive export
+        grid_dlg.toggle_slice_excluded(1)
+        assert len(grid_dlg.compute_slices()) == 3
+        assert "3" in grid_dlg.selection_count_label.text()
+        grid_zip = grid_dlg.export_to_zip(tmp_path / "grid_slices.zip")
+        assert grid_zip is not None and grid_zip.is_file()
+        import zipfile
+        with zipfile.ZipFile(grid_zip, "r") as zf:
+            assert len(zf.namelist()) == 3
+        grid_dlg.toggle_slice_excluded(1)  # re-include all 4
         grid_files = grid_dlg.export_to_folder(tmp_path / "grid_out")
         assert len(grid_files) == 4 and all(p.is_file() for p in grid_files)
         grid_tabs = grid_dlg.open_in_tabs()
@@ -675,6 +700,13 @@ def test_main_window_canvas_panels_and_dialogs() -> None:
         )
         assert len(alpha_dlg.detected_boxes) == 2
         assert len(previewed[-1]) == 2
+        alpha_dlg.toggle_sprite_excluded(0)
+        assert len(alpha_dlg.extract_slices()) == 1
+        alpha_zip = alpha_dlg.export_to_zip(tmp_path / "alpha_sprites.zip")
+        assert alpha_zip is not None and alpha_zip.is_file()
+        with zipfile.ZipFile(alpha_zip, "r") as zf:
+            assert len(zf.namelist()) == 1
+        alpha_dlg.toggle_sprite_excluded(0)  # re-include both
         alpha_files = alpha_dlg.export_to_folder(tmp_path / "alpha_out")
         assert len(alpha_files) == 2 and all(p.is_file() for p in alpha_files)
         alpha_tabs = alpha_dlg.open_in_tabs()
@@ -836,6 +868,56 @@ def test_main_window_canvas_panels_and_dialogs() -> None:
     assert "Layers" in win.layers_dock.windowTitle()
     win.set_language("ru", persist=False)
     assert "Слои" in win.layers_dock.windowTitle()
+
+    # 13. Canvas RMB Context Menu & Selection Actions (Ctrl+J, Ctrl+Shift+J, Invert, Fill, Clear, Crop)
+    ctx_doc = win.new_document(60, 60, title="CtxMenuDoc", initial_fill=(100, 150, 200, 255))
+    menu_no_sel = win.build_canvas_context_menu()
+    assert len(menu_no_sel.actions()) == 4
+
+    sel = np.zeros((60, 60), dtype=np.uint8)
+    sel[10:30, 10:30] = 255
+    ctx_doc.set_selection_mask(sel)
+    menu_with_sel = win.build_canvas_context_menu()
+    assert len(menu_with_sel.actions()) >= 8
+
+    # Invert selection
+    win.invert_selection()
+    assert ctx_doc.selection_mask[20, 20] == 0 and ctx_doc.selection_mask[5, 5] == 255
+    win.invert_selection()
+    assert ctx_doc.selection_mask[20, 20] == 255
+
+    # Layer via Copy (Ctrl+J)
+    copied_layer = win.layer_via_copy()
+    assert copied_layer is not None and len(ctx_doc.layers) == 2
+    assert (copied_layer.offset_x, copied_layer.offset_y) == (10, 10)
+    assert (copied_layer.width, copied_layer.height) == (20, 20)
+    assert ctx_doc.selection_mask is None
+
+    # Layer via Cut (Ctrl+Shift+J) + Undo
+    ctx_doc.set_active_layer(0)
+    ctx_doc.set_selection_mask(sel)
+    cut_layer = win.layer_via_cut()
+    assert cut_layer is not None and len(ctx_doc.layers) == 3
+    assert ctx_doc.layers[0].pixels[20, 20, 3] == 0
+    ctx_doc.undo()
+    assert len(ctx_doc.layers) == 2 and ctx_doc.layers[0].pixels[20, 20, 3] == 255
+
+    # Fill selection & Clear selection contents
+    ctx_doc.set_active_layer(0)
+    ctx_doc.set_selection_mask(sel)
+    win.tool_context.fg_color = (255, 10, 20, 255)
+    assert win.fill_selection_with_fg() is True
+    assert tuple(ctx_doc.layers[0].pixels[20, 20]) == (255, 10, 20, 255)
+    assert win.delete_selection_contents() is True
+    assert ctx_doc.layers[0].pixels[20, 20, 3] == 0
+    ctx_doc.undo()
+    assert tuple(ctx_doc.layers[0].pixels[20, 20]) == (255, 10, 20, 255)
+
+    # Crop to selection + Undo
+    assert win.crop_to_selection() is True
+    assert (ctx_doc.width, ctx_doc.height) == (20, 20)
+    ctx_doc.undo()
+    assert (ctx_doc.width, ctx_doc.height) == (60, 60)
 
     win.close()
     qapp.processEvents()

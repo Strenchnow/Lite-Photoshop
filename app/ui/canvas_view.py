@@ -10,6 +10,7 @@ from PySide6.QtCore import QLineF, QMimeData, QPointF, QRectF, Qt, QTimer, Signa
 from PySide6.QtGui import (
     QBrush,
     QColor,
+    QContextMenuEvent,
     QDragEnterEvent,
     QDragMoveEvent,
     QDropEvent,
@@ -88,6 +89,7 @@ class CanvasView(QWidget):
     zoomChanged = Signal(float)
     documentModified = Signal()
     filesDropped = Signal(list)
+    contextMenuRequested = Signal(object)
 
     def __init__(
         self,
@@ -658,6 +660,13 @@ class CanvasView(QWidget):
             event.acceptProposedAction()
             return
         super().dropEvent(event)
+
+    def contextMenuEvent(self, event: QContextMenuEvent) -> None:
+        if not self._temp_pan_active:
+            self.contextMenuRequested.emit(event.globalPos())
+            event.accept()
+            return
+        super().contextMenuEvent(event)
 
     def keyReleaseEvent(self, event: QKeyEvent) -> None:
         if event.key() == Qt.Key_Space and not event.isAutoRepeat():

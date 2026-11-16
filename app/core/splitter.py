@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import io
+import zipfile
 from pathlib import Path
 from typing import Iterable
 
@@ -141,6 +143,27 @@ def export_slices_to_folder(
         Image.fromarray(rgba, mode="RGBA").save(out_path, format="PNG")
         saved_paths.append(out_path)
     return saved_paths
+
+
+def export_slices_to_zip(
+    slices: Iterable[object],
+    zip_path: Path,
+    prefix: str = "sprite",
+) -> Path:
+    """Write all RGBA PNG slices directly into a ZIP archive without temp files."""
+    slice_list = list(slices)
+    target = Path(zip_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    clean_prefix = (prefix or "sprite").strip() or "sprite"
+    digits = max(3, len(str(max(1, len(slice_list)))))
+
+    with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for idx, item in enumerate(slice_list, start=1):
+            rgba = _slice_pixels(item)
+            bio = io.BytesIO()
+            Image.fromarray(rgba, mode="RGBA").save(bio, format="PNG")
+            zf.writestr(f"{clean_prefix}_{idx:0{digits}d}.png", bio.getvalue())
+    return target
 
 
 def open_slices_as_tabs(

@@ -1053,6 +1053,7 @@ class FreeTransformTool(BaseTool):
         self.orig_h = 0.0
 
         self._layer_id: Optional[str] = None
+        self._doc_ref: Optional["DocumentSession"] = None
         self._src_pixels: Optional[np.ndarray] = None
         self._src_mask: Optional[np.ndarray] = None
         self._drag_mode: Optional[str] = None
@@ -1060,6 +1061,7 @@ class FreeTransformTool(BaseTool):
         self._drag_orig_state: tuple[float, float, float, float, float] = (0.0, 0.0, 0.0, 0.0, 0.0)
         self._drag_start_angle_mouse = 0.0
         self._preview_qimage: Any = None
+        self._preview_rgba_buf: Optional[np.ndarray] = None
 
     @property
     def bounds(self) -> tuple[float, float, float, float]:
@@ -1092,6 +1094,7 @@ class FreeTransformTool(BaseTool):
             return False
 
         self._layer_id = layer.id
+        self._doc_ref = doc
         self._src_pixels = np.ascontiguousarray(layer.pixels[ly0:ly1, lx0:lx1].copy())
         if layer.mask is not None:
             self._src_mask = np.ascontiguousarray(layer.mask.buffer[ly0:ly1, lx0:lx1].copy())
@@ -1108,6 +1111,8 @@ class FreeTransformTool(BaseTool):
         self.active = True
         self._drag_mode = None
         self._preview_qimage = None
+        self._preview_rgba_buf = None
+        doc.set_suppressed_layer(layer.id)
         self.context.notify_canvas_invalidated()
         return True
 
@@ -1166,10 +1171,13 @@ class FreeTransformTool(BaseTool):
         }
 
     def _hit_test(self, cx: float, cy: float, zoom: float) -> Optional[str]:
-        hit_r = 10.0 / max(float(zoom), 1e-3)
+        z = max(float(zoom), 1e-3)
+        rot_r = 9.0 / z
+        handle_r = min(8.0 / z, max(3.0 / z, min(self.box_w, self.box_h) * 0.35))
         lx, ly = self._canvas_to_local(cx, cy)
         for name, (hx, hy) in self._handle_positions_local(zoom).items():
-            if math.hypot(lx - hx, ly - hy) <= hit_r:
+            r = rot_r if name == "rotate" else handle_r
+            if math.hypot(lx - hx, ly - hy) <= r:
                 return name
         if abs(lx) <= self.box_w * 0.5 and abs(ly) <= self.box_h * 0.5:
             return "move"
@@ -1229,12 +1237,56 @@ class FreeTransformTool(BaseTool):
         mods = extract_modifiers(modifiers)
 
         if self._drag_mode == "move":
-            self.center_x = ocx + (float(cx) - self._drag_start_canvas[0])
-            self.center_y = ocy + (float(cy) - self._drag_start_canvas[1])
+            raw_cx = ocx + (float(cx) - self._drag_start_canvas[0])
+            raw_cy = ocy + (float(cy) - self._drag_start_canvas[1])
+            if mods & MOD_SHIFT:
+                self.context.snap_guides.clear()
+                self.center_x = raw_cx
+                self.center_y = raw_cy
+            else:
+                threshold = 6.0 / max(float(doc.viewport.zoom), 1e-3)
+                guides: list[tuple[str, float]] = []
+
+                hw = self.box_w * 0.5
+                hh = self.box_h * 0.5
+                x_targets = (0.0, doc.width * 0.5, float(doc.width))
+                y_targets = (0.0, doc.height * 0.5, float(doc.height))
+
+                best_dx: Optional[float] = None
+                best_xd = threshold + 1e-9
+                for anchor in (raw_cx - hw, raw_cx, raw_cx + hw):
+                    for t in x_targets:
+                        d = abs(t - anchor)
+                        if d <= best_xd:
+                            best_xd = d
+                            best_dx = t - anchor
+                snapped_cx = raw_cx + (best_dx if best_dx is not None else 0.0)
+                for t in x_targets:
+                    if min(abs((snapped_cx - hw) - t), abs(snapped_cx - t), abs((snapped_cx + hw) - t)) <= 0.6:
+                        guides.append(("vertical", float(t)))
+
+                best_dy: Optional[float] = None
+                best_yd = threshold + 1e-9
+                for anchor in (raw_cy - hh, raw_cy, raw_cy + hh):
+                    for t in y_targets:
+                        d = abs(t - anchor)
+                        if d <= best_yd:
+                            best_yd = d
+                            best_dy = t - anchor
+                snapped_cy = raw_cy + (best_dy if best_dy is not None else 0.0)
+                for t in y_targets:
+                    if min(abs((snapped_cy - hh) - t), abs(snapped_cy - t), abs((snapped_cy + hh) - t)) <= 0.6:
+                        guides.append(("horizontal", float(t)))
+
+                self.center_x = snapped_cx
+                self.center_y = snapped_cy
+                self.context.snap_guides[:] = guides
+
             self.context.notify_canvas_invalidated()
             return
 
         if self._drag_mode == "rotate":
+            self.context.snap_guides.clear()
             cur_ang = math.degrees(math.atan2(float(cy) - ocy, float(cx) - ocx))
             new_ang = oang + (cur_ang - self._drag_start_angle_mouse)
             if mods & MOD_SHIFT:
@@ -1242,6 +1294,26 @@ class FreeTransformTool(BaseTool):
             self.angle_deg = new_ang
             self.context.notify_canvas_invalidated()
             return
+
+        # Scale handles: snap dragged edges to canvas edges/center when axis-aligned and Shift is not held
+        eff_cx = float(cx)
+        eff_cy = float(cy)
+        guides_scale: list[tuple[str, float]] = []
+        if not (mods & MOD_SHIFT) and abs(oang % 180.0) < 1e-3:
+            threshold = 6.0 / max(float(doc.viewport.zoom), 1e-3)
+            if "e" in self._drag_mode or "w" in self._drag_mode:
+                x_targets = (0.0, doc.width * 0.5, float(doc.width))
+                best_t = min(x_targets, key=lambda t: abs(t - eff_cx))
+                if abs(best_t - eff_cx) <= threshold:
+                    eff_cx = best_t
+                    guides_scale.append(("vertical", float(best_t)))
+            if "n" in self._drag_mode or "s" in self._drag_mode:
+                y_targets = (0.0, doc.height * 0.5, float(doc.height))
+                best_t = min(y_targets, key=lambda t: abs(t - eff_cy))
+                if abs(best_t - eff_cy) <= threshold:
+                    eff_cy = best_t
+                    guides_scale.append(("horizontal", float(best_t)))
+        self.context.snap_guides[:] = guides_scale
 
         # Scale handles: anchor opposite corner/edge in unrotated box space
         rad = math.radians(oang)
@@ -1264,8 +1336,8 @@ class FreeTransformTool(BaseTool):
         anchor_wx = ocx + alx * cos_a - aly * sin_a
         anchor_wy = ocy + alx * sin_a + aly * cos_a
 
-        dx_w = float(cx) - anchor_wx
-        dy_w = float(cy) - anchor_wy
+        dx_w = eff_cx - anchor_wx
+        dy_w = eff_cy - anchor_wy
         rel_lx = dx_w * cos_a + dy_w * sin_a
         rel_ly = -dx_w * sin_a + dy_w * cos_a
 
@@ -1313,6 +1385,9 @@ class FreeTransformTool(BaseTool):
         sy: float = 0.0,
     ) -> None:
         self._drag_mode = None
+        if self.context.snap_guides:
+            self.context.snap_guides.clear()
+            self.context.notify_canvas_invalidated()
 
     def commit(self, doc: "DocumentSession") -> bool:
         """Commit transformed pixels (and mask if present) via bilinear resampling with Undo."""
@@ -1414,13 +1489,19 @@ class FreeTransformTool(BaseTool):
         self.cancel()
         return True
 
-    def cancel(self) -> None:
+    def cancel(self, doc: Optional["DocumentSession"] = None) -> None:
+        target_doc = doc or self._doc_ref
+        if target_doc is not None:
+            target_doc.set_suppressed_layer(None)
         self.active = False
         self._layer_id = None
+        self._doc_ref = None
         self._src_pixels = None
         self._src_mask = None
         self._drag_mode = None
         self._preview_qimage = None
+        self._preview_rgba_buf = None
+        self.context.snap_guides.clear()
         self.context.notify_canvas_invalidated()
 
     def key_press(
@@ -1455,9 +1536,14 @@ class FreeTransformTool(BaseTool):
         # Draw live transformed preview of source patch
         if self._src_pixels is not None:
             if self._preview_qimage is None:
-                sh, sw = self._src_pixels.shape[0], self._src_pixels.shape[1]
+                preview_buf = self._src_pixels.copy()
+                if self._src_mask is not None:
+                    alpha = (preview_buf[:, :, 3].astype(np.uint16) * self._src_mask.astype(np.uint16) + 127) // 255
+                    preview_buf[:, :, 3] = alpha.astype(np.uint8)
+                self._preview_rgba_buf = np.ascontiguousarray(preview_buf, dtype=np.uint8)
+                sh, sw = self._preview_rgba_buf.shape[0], self._preview_rgba_buf.shape[1]
                 self._preview_qimage = QImage(
-                    self._src_pixels.data,
+                    self._preview_rgba_buf.data,
                     sw,
                     sh,
                     sw * 4,
@@ -1465,6 +1551,9 @@ class FreeTransformTool(BaseTool):
                 )
             scx, scy = viewport.canvas_to_screen(self.center_x, self.center_y)
             painter.save()
+            layer_obj = doc.get_layer_by_id(self._layer_id) if self._layer_id else None
+            if layer_obj is not None:
+                painter.setOpacity(layer_obj.opacity)
             painter.translate(scx, scy)
             painter.rotate(self.angle_deg)
             sw_screen = self.box_w * viewport.zoom
@@ -1509,4 +1598,4 @@ class FreeTransformTool(BaseTool):
             self.begin_transform(doc)
 
     def on_deactivate(self, doc: Optional["DocumentSession"] = None) -> None:
-        self.cancel()
+        self.cancel(doc)
