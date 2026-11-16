@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.o
+*.obj
+*.exp
+*.lib
+.pytest_cache/
+build/
+dist/
+*.spec
+assets/models/*.onnx

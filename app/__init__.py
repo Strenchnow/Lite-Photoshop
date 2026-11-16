@@ -1,0 +1,1 @@
+"""LitePhotoEditor application package."""
