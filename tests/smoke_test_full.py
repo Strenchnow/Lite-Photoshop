@@ -37,7 +37,8 @@ def test_imports_and_lazy_loading() -> None:
     import app.ui.main_window  # noqa: F401
     import app.ui.panels  # noqa: F401
     import app.main  # noqa: F401
-    import build_exe  # noqa: F401
+    import scripts.build_exe  # noqa: F401
+    import scripts.build_installer  # noqa: F401
 
     # Strict lazy loading: onnxruntime must NOT be loaded on module import
     assert "onnxruntime" not in sys.modules, (

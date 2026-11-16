@@ -1,5 +1,5 @@
 ; LitePhotoEditor — Inno Setup 6 Script
-; Build with: python build_installer.py  (or ISCC.exe installer\setup.iss)
+; Build with: python scripts\build_installer.py  (or ISCC.exe installer\setup.iss)
 
 #define MyAppName "LitePhotoEditor"
 #define MyAppVersion "1.0.0"

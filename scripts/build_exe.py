@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -22,7 +22,7 @@ ENTRY_POINT = PROJECT_ROOT / "app" / "main.py"
 THEME_QSS = PROJECT_ROOT / "app" / "ui" / "theme.qss"
 KEYBINDINGS_JSON = PROJECT_ROOT / "app" / "config" / "keybindings.json"
 ASSETS_DIR = PROJECT_ROOT / "assets"
-MASTER_ICON_PNG = PROJECT_ROOT / "icon.png"
+MASTER_ICON_PNG = ASSETS_DIR / "source_icon.png"
 ICON_ICO = ASSETS_DIR / "icon.ico"
 ICON_256_PNG = ASSETS_DIR / "icon_256.png"
 ICO_SIZES: tuple[tuple[int, int], ...] = (

@@ -10,11 +10,11 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-import build_exe  # noqa: E402
+from scripts import build_exe  # noqa: E402
 
 
 INSTALLER_SCRIPT = PROJECT_ROOT / "installer" / "setup.iss"
@@ -88,7 +88,7 @@ def build_installer(check_only: bool = False, force_icons: bool = False) -> int:
             "Inno Setup Compiler (ISCC.exe) not found.\n"
             "Install Inno Setup 6 via:\n"
             "  winget install JRSoftware.InnoSetup\n"
-            f"Then compile '{INSTALLER_SCRIPT}' or re-run 'python build_installer.py'."
+            f"Then compile '{INSTALLER_SCRIPT}' or re-run 'python scripts/build_installer.py'."
         )
         if check_only:
             print(f"Note: {msg}")
