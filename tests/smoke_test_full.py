@@ -456,8 +456,12 @@ def test_main_window_canvas_panels_and_dialogs() -> None:
 
     assert resolve_asset_path("app/ui/theme.qss").is_file()
     assert resolve_asset_path("app/config/keybindings.json").is_file()
+    assert resolve_asset_path("assets/icon.ico").is_file()
+    assert resolve_asset_path("assets/icon_256.png").is_file()
 
     qapp, win = create_application([])
+    assert not qapp.windowIcon().isNull()
+    assert not win.windowIcon().isNull()
     win.show()
     qapp.processEvents()
 

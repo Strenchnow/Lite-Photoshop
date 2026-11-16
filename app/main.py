@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import ctypes
 import sys
 from pathlib import Path
 from typing import Optional, Sequence
 
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 # Ensure project root is importable when running `python app/main.py` directly
@@ -50,20 +52,54 @@ def load_stylesheet(app: QApplication, relative_qss: str = "app/ui/theme.qss") -
     return False
 
 
+def load_app_icon() -> QIcon:
+    """Load the lightweight 256x256 PNG and multi-res ICO as a QIcon."""
+    icon = QIcon()
+    png_256 = resolve_asset_path("assets/icon_256.png")
+    ico_file = resolve_asset_path("assets/icon.ico")
+    if png_256.is_file():
+        icon.addFile(str(png_256))
+    if ico_file.is_file():
+        icon.addFile(str(ico_file))
+    return icon
+
+
+def set_windows_app_user_model_id(app_id: str = "LitePhotoEditor.App.1") -> None:
+    """Set Windows AppUserModelID so Taskbar uses the custom app icon instead of python.exe."""
+    if sys.platform == "win32":
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+        except Exception:
+            pass
+
+
 def create_application(argv: Optional[Sequence[str]] = None) -> tuple[QApplication, MainWindow]:
-    """Create or reuse QApplication, load theme.qss, and build MainWindow with an initial tab."""
+    """Create or reuse QApplication, load theme.qss, set app icon, and build MainWindow."""
+    set_windows_app_user_model_id()
+
+    args = list(argv) if argv is not None else sys.argv
     existing = QApplication.instance()
     if isinstance(existing, QApplication):
         app = existing
     else:
-        args = list(argv) if argv is not None else sys.argv
         app = QApplication(args)
 
     app.setApplicationName("LitePhotoEditor")
     app.setOrganizationName("LitePhotoEditor")
+    app_icon = load_app_icon()
+    if not app_icon.isNull():
+        app.setWindowIcon(app_icon)
     load_stylesheet(app, "app/ui/theme.qss")
 
-    window = MainWindow(create_initial_doc=True)
+    cli_files = [Path(p) for p in args[1:] if p and not p.startswith("-") and Path(p).is_file()]
+    window = MainWindow(create_initial_doc=not cli_files)
+    if not app_icon.isNull():
+        window.setWindowIcon(app_icon)
+    for fpath in cli_files:
+        try:
+            window.open_file(fpath)
+        except Exception:
+            pass
     return app, window
 
 

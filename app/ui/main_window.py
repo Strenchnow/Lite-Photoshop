@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 from typing import Optional
 
 import numpy as np
@@ -15,6 +16,7 @@ from PySide6.QtGui import (
     QDragMoveEvent,
     QDropEvent,
     QGuiApplication,
+    QIcon,
     QImage,
     QKeySequence,
 )
@@ -138,6 +140,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(tr("app.title"))
         self.resize(1280, 820)
         self.setAcceptDrops(True)
+        self._apply_window_icon()
 
         self.tab_manager = tab_manager if tab_manager is not None else DocumentTabManager()
         self.tool_context = ToolContext(
@@ -176,6 +179,22 @@ class MainWindow(QMainWindow):
 
         self.select_tool(ToolType.BRUSH.value)
         self.canvas_view.installEventFilter(self)
+
+    def _apply_window_icon(self) -> None:
+        icon = QGuiApplication.windowIcon()
+        if icon.isNull():
+            icon = QIcon()
+            base = (
+                Path(sys._MEIPASS)  # type: ignore[attr-defined]
+                if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS")
+                else Path(__file__).resolve().parents[2]
+            )
+            for rel in ("assets/icon_256.png", "assets/icon.ico"):
+                candidate = base / rel
+                if candidate.is_file():
+                    icon.addFile(str(candidate))
+        if not icon.isNull():
+            self.setWindowIcon(icon)
 
     def _build_central_area(self) -> None:
         central = QWidget()
